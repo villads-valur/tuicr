@@ -1,15 +1,25 @@
 # tuicr
 
-Terminal UI for Code Reviews - A Rust TUI for reviewing changes made by coding agents.
+Review AI-generated diffs like a GitHub pull request, right from your terminal.
+
+## Why I built this
+
+I use Claude a lot but there's no middle ground between "review every change"
+and "accept all edits". Reviewing every change slows things down to human speed,
+but accepting all edits makes the final review painful since I end up leaving
+comments one at a time and wait after each fix.
+
+`tuicr` is the middle ground. Let the agent loose, review the changes like a
+normal PR, drop comments where needed, and export everything as structured
+feedback Claude can act on in one pass.
+
+It makes my AI-assisted development go brrrrrr.
 
 ## Overview
 
-`tuicr` is a terminal-based code review tool designed for reviewing changes made by AI coding agents like Claude, Codex, or similar tools. It provides a GitHub-style diff viewing experience with vim keybindings, allowing you to:
-
-- View all changed files in a continuous, scrollable diff
-- Leave comments at the file or line level with types (Note, Suggestion, Issue, Praise)
-- Mark files as reviewed
-- Copy your review as structured Markdown to clipboard for feeding back to the coding agent
+A GitHub-style diff viewer in your terminal with vim keybindings. Scroll through
+changed files, leave comments, mark files as reviewed, and copy your full review
+to clipboard in a format ready to paste back to the agent.
 
 ## Features
 
@@ -95,17 +105,4 @@ Each comment is numbered and self-contained with its file path and line number (
 ## Session Persistence
 
 Sessions are automatically saved to `~/.local/share/tuicr/reviews/` (XDG compliant). When you reopen `tuicr` in the same repository, your previous review progress (comments, reviewed status) is restored.
-
-## Development
-
-```bash
-# Run in development
-cargo run
-
-# Run tests
-cargo test
-
-# Format code
-cargo fmt
-```
 
