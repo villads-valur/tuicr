@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use crate::error::Result;
 use crate::git::{RepoInfo, get_working_tree_diff};
-use crate::model::{Comment, CommentType, DiffFile, FileStatus, ReviewSession};
+use crate::model::{Comment, CommentType, DiffFile, ReviewSession};
+use crate::persistence::{find_session_for_repo, load_session};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -57,9 +58,18 @@ impl App {
         let repo_info = RepoInfo::discover()?;
         let diff_files = get_working_tree_diff(&repo_info.repo)?;
 
-        let mut session =
-            ReviewSession::new(repo_info.root_path.clone(), repo_info.head_commit.clone());
+        // Try to load existing session, or create new one
+        let mut session = match find_session_for_repo(&repo_info.root_path) {
+            Ok(Some(path)) => match load_session(&path) {
+                Ok(s) => s,
+                Err(_) => {
+                    ReviewSession::new(repo_info.root_path.clone(), repo_info.head_commit.clone())
+                }
+            },
+            _ => ReviewSession::new(repo_info.root_path.clone(), repo_info.head_commit.clone()),
+        };
 
+        // Ensure all current diff files are in the session
         for file in &diff_files {
             let path = file.display_path().clone();
             session.add_file(path, file.status);

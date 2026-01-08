@@ -147,6 +147,17 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("═".repeat(40), styles::file_header_style()),
         ]));
 
+        // Show file-level comments right after the header
+        if let Some(review) = app.session.files.get(path) {
+            for comment in &review.file_comments {
+                lines.push(comment_panel::format_comment_line(
+                    comment.comment_type,
+                    &comment.content,
+                    None,
+                ));
+            }
+        }
+
         if file.is_binary {
             lines.push(Line::from(Span::styled(
                 "  (binary file)",
@@ -158,6 +169,15 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                 styles::dim_style(),
             )));
         } else {
+            // Get line comments for this file
+            let line_comments = app
+                .session
+                .files
+                .get(path)
+                .map(|r| &r.line_comments)
+                .cloned()
+                .unwrap_or_default();
+
             for hunk in &file.hunks {
                 // Hunk header
                 lines.push(Line::from(Span::styled(
@@ -194,6 +214,20 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                         Span::styled(line_num, styles::dim_style()),
                         Span::styled(format!("{} {}", prefix, diff_line.content), style),
                     ]));
+
+                    // Show line comments after the relevant line
+                    let current_line = diff_line.new_lineno.or(diff_line.old_lineno);
+                    if let Some(ln) = current_line {
+                        if let Some(comments) = line_comments.get(&ln) {
+                            for comment in comments {
+                                lines.push(comment_panel::format_comment_line(
+                                    comment.comment_type,
+                                    &comment.content,
+                                    Some(ln),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }

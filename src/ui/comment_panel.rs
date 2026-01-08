@@ -23,7 +23,7 @@ pub fn render_comment_input(frame: &mut Frame, app: &App) {
 
     let block = Block::default()
         .title(format!(
-            " {} [{}] (Ctrl-Enter to save, Esc to cancel) ",
+            " {} [{}] (Ctrl-S to save, Ctrl-C/Esc to cancel) ",
             comment_kind,
             app.comment_type.as_str()
         ))

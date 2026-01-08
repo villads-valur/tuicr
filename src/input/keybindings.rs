@@ -121,9 +121,15 @@ fn map_command_mode(key: KeyEvent) -> Action {
 
 fn map_comment_mode(key: KeyEvent) -> Action {
     match (key.code, key.modifiers) {
+        // Cancel: Esc, Ctrl+C, Ctrl+D
         (KeyCode::Esc, KeyModifiers::NONE) => Action::ExitMode,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::ExitMode,
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Action::ExitMode,
+        // Submit: Ctrl+Enter, Ctrl+S, Shift+Enter
         (KeyCode::Enter, KeyModifiers::CONTROL) => Action::SubmitInput,
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::SubmitInput,
+        (KeyCode::Enter, KeyModifiers::SHIFT) => Action::SubmitInput,
+        // Editing
         (KeyCode::Backspace, KeyModifiers::NONE) => Action::DeleteChar,
         (KeyCode::Char('w'), KeyModifiers::CONTROL) => Action::DeleteWord,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::ClearLine,
