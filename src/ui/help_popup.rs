@@ -198,10 +198,37 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  v         ",
+                "  v/V       ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Toggle unified/side-by-side diff view"),
+            Span::raw("Enter visual mode for range comments"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Visual Mode",
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  j/k       ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Extend selection up/down"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  c/Enter   ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Create comment for selected range"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Esc/v/V   ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Cancel visual selection"),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -291,6 +318,13 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("Toggle line wrap in diff view"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :diff     ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Toggle unified/side-by-side diff view"),
         ]),
         Line::from(vec![
             Span::styled(
