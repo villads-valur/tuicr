@@ -1542,6 +1542,49 @@ impl App {
         self.pending_confirm = None;
     }
 
+    pub fn enter_commit_select_mode(&mut self) -> Result<()> {
+        let commits = self.vcs.get_recent_commits(20)?;
+        if commits.is_empty() {
+            self.set_message("No commits found");
+            return Ok(());
+        }
+
+        self.commit_list = commits;
+        self.commit_list_cursor = 0;
+        self.commit_selection_range = None;
+        self.input_mode = InputMode::CommitSelect;
+        Ok(())
+    }
+
+    pub fn exit_commit_select_mode(&mut self) -> Result<()> {
+        self.input_mode = InputMode::Normal;
+
+        // If we were viewing commits, try to go back to working tree
+        if matches!(self.diff_source, DiffSource::CommitRange(_)) {
+            let highlighter = self.theme.syntax_highlighter();
+            match self.vcs.get_working_tree_diff(highlighter) {
+                Ok(diff_files) => {
+                    self.diff_files = diff_files;
+                    self.diff_source = DiffSource::WorkingTree;
+
+                    // Update session for new files
+                    for file in &self.diff_files {
+                        let path = file.display_path().clone();
+                        self.session.add_file(path, file.status);
+                    }
+
+                    self.sort_files_by_directory(true);
+                    self.expand_all_dirs();
+                }
+                Err(_) => {
+                    self.set_message("No working tree changes");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn toggle_diff_view_mode(&mut self) {
         self.diff_view_mode = match self.diff_view_mode {
             DiffViewMode::Unified => DiffViewMode::SideBySide,
@@ -1653,7 +1696,8 @@ impl App {
 
         // Update session with the newest commit as base
         let newest_commit_id = selected_ids.last().unwrap().clone();
-        self.session = ReviewSession::new(self.vcs_info.root_path.clone(), newest_commit_id);
+        self.session =
+            ReviewSession::new(self.vcs_info.root_path.clone(), newest_commit_id.clone());
 
         // Add files to session
         for file in &diff_files {

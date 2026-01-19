@@ -154,6 +154,11 @@ pub fn handle_command_action(app: &mut App, action: Action) {
                 "set wrap" => app.set_diff_wrap(true),
                 "set wrap!" => app.toggle_diff_wrap(),
                 "diff" => app.toggle_diff_view_mode(),
+                "commits" => {
+                    if let Err(e) = app.enter_commit_select_mode() {
+                        app.set_error(format!("Failed to load commits: {e}"));
+                    }
+                }
                 _ => app.set_message(format!("Unknown command: {cmd}")),
             }
             app.exit_command_mode();
@@ -310,6 +315,11 @@ pub fn handle_commit_select_action(app: &mut App, action: Action) {
         Action::ConfirmCommitSelect => {
             if let Err(e) = app.confirm_commit_selection() {
                 app.set_error(format!("Failed to load commits: {e}"));
+            }
+        }
+        Action::ExitMode => {
+            if let Err(e) = app.exit_commit_select_mode() {
+                app.set_error(format!("Failed to reload working tree: {e}"));
             }
         }
         Action::Quit => app.should_quit = true,

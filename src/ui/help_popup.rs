@@ -328,6 +328,13 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(
+                "  :commits  ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Select commits to review"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  :clear    ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
