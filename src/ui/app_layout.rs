@@ -141,8 +141,11 @@ fn render_commit_select(frame: &mut Frame, app: &App) {
     let list = Paragraph::new(items);
     frame.render_widget(list, inner);
 
-    // Footer hints with selection count
-    let selected_count = match range {
+    // Footer with mode, hints, and right-aligned message
+    let theme = &app.theme;
+    let mode_span = Span::styled(" SELECT ", styles::mode_style(theme));
+
+    let selected_count = match app.commit_selection_range {
         Some((start, end)) => end - start + 1,
         None => 0,
     };
@@ -152,8 +155,20 @@ fn render_commit_select(frame: &mut Frame, app: &App) {
         String::new()
     };
     let hints = format!(" j/k:navigate  Space:select range  Enter:confirm  q:quit{selection_info}");
-    let footer = Paragraph::new(hints)
-        .style(styles::status_bar_style(&app.theme))
+    let hints_span = Span::styled(hints, Style::default().fg(theme.fg_secondary));
+
+    let left_spans = vec![mode_span, hints_span];
+
+    let (message_span, message_width) = status_bar::build_message_span(app.message.as_ref(), theme);
+    let spans = status_bar::build_right_aligned_spans(
+        left_spans,
+        message_span,
+        message_width,
+        chunks[2].width as usize,
+    );
+
+    let footer = Paragraph::new(Line::from(spans))
+        .style(styles::status_bar_style(theme))
         .block(Block::default());
     frame.render_widget(footer, chunks[2]);
 }
@@ -667,7 +682,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         .take(inner.height as usize)
         .collect();
 
-    let max_content_width = visible_lines_unscrolled
+    // Calculate the width of each line for max_content_width and visible line count
+    let line_widths: Vec<usize> = visible_lines_unscrolled
         .iter()
         .map(|line| {
             line.spans
@@ -675,11 +691,36 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 .map(|span| span.content.width())
                 .sum::<usize>()
         })
-        .max()
-        .unwrap_or(0);
+        .collect();
+
+    let max_content_width = line_widths.iter().copied().max().unwrap_or(0);
 
     app.diff_state.viewport_width = inner.width as usize;
     app.diff_state.max_content_width = max_content_width;
+
+    // Calculate how many logical lines actually fit in the viewport when wrapped
+    let viewport_width = inner.width as usize;
+    let viewport_height = inner.height as usize;
+    app.diff_state.visible_line_count = if app.diff_state.wrap_lines && viewport_width > 0 {
+        let mut visual_rows_used = 0;
+        let mut logical_lines_visible = 0;
+        for &width in &line_widths {
+            // Each line takes at least 1 row, plus extra rows if it wraps
+            let rows_for_line = if width == 0 {
+                1
+            } else {
+                width.div_ceil(viewport_width)
+            };
+            if visual_rows_used + rows_for_line > viewport_height {
+                break;
+            }
+            visual_rows_used += rows_for_line;
+            logical_lines_visible += 1;
+        }
+        logical_lines_visible.max(1)
+    } else {
+        viewport_height
+    };
 
     let max_scroll_x = max_content_width.saturating_sub(inner.width as usize);
     if app.diff_state.scroll_x > max_scroll_x {
@@ -939,7 +980,8 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         .take(inner.height as usize)
         .collect();
 
-    let max_content_width = visible_lines_unscrolled
+    // Calculate the width of each line for max_content_width and visible line count
+    let line_widths: Vec<usize> = visible_lines_unscrolled
         .iter()
         .map(|line| {
             line.spans
@@ -947,11 +989,36 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 .map(|span| span.content.width())
                 .sum::<usize>()
         })
-        .max()
-        .unwrap_or(0);
+        .collect();
+
+    let max_content_width = line_widths.iter().copied().max().unwrap_or(0);
 
     app.diff_state.viewport_width = inner.width as usize;
     app.diff_state.max_content_width = max_content_width;
+
+    // Calculate how many logical lines actually fit in the viewport when wrapped
+    let viewport_width = inner.width as usize;
+    let viewport_height = inner.height as usize;
+    app.diff_state.visible_line_count = if app.diff_state.wrap_lines && viewport_width > 0 {
+        let mut visual_rows_used = 0;
+        let mut logical_lines_visible = 0;
+        for &width in &line_widths {
+            // Each line takes at least 1 row, plus extra rows if it wraps
+            let rows_for_line = if width == 0 {
+                1
+            } else {
+                width.div_ceil(viewport_width)
+            };
+            if visual_rows_used + rows_for_line > viewport_height {
+                break;
+            }
+            visual_rows_used += rows_for_line;
+            logical_lines_visible += 1;
+        }
+        logical_lines_visible.max(1)
+    } else {
+        viewport_height
+    };
 
     let max_scroll_x = max_content_width.saturating_sub(inner.width as usize);
     if app.diff_state.scroll_x > max_scroll_x {
