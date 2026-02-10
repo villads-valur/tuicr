@@ -118,7 +118,7 @@ Theme resolution precedence:
 
 Notes:
 - Invalid `--theme` values cause an immediate non-zero exit.
-- Unknown keys in `config.toml` are rejected.
+- Unknown keys in `config.toml` are ignored with a startup warning.
 
 ### Keybindings
 

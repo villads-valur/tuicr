@@ -60,16 +60,20 @@ fn main() -> anyhow::Result<()> {
     // This also configures syntax highlighting colors before diff parsing
     let cli_args = parse_cli_args();
     let mut startup_warnings = Vec::new();
-    let config = match config::load_config() {
-        Ok(config) => config,
+    let config_outcome = match config::load_config() {
+        Ok(outcome) => outcome,
         Err(e) => {
             startup_warnings.push(format!("Failed to load config: {e}"));
-            None
+            config::ConfigLoadOutcome::default()
         }
     };
+    startup_warnings.extend(config_outcome.warnings);
     let (theme, theme_warnings) = resolve_theme_with_config(
         cli_args.theme,
-        config.as_ref().and_then(|cfg| cfg.theme.as_deref()),
+        config_outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.theme.as_deref()),
     );
     startup_warnings.extend(theme_warnings);
 

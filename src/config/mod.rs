@@ -3,12 +3,19 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use toml::Value;
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct AppConfig {
     pub theme: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigLoadOutcome {
+    pub config: Option<AppConfig>,
+    pub warnings: Vec<String>,
 }
 
 pub fn config_path() -> Result<PathBuf> {
@@ -57,19 +64,45 @@ fn config_path_from_parts(
     }
 }
 
-pub fn load_config() -> Result<Option<AppConfig>> {
+pub fn load_config() -> Result<ConfigLoadOutcome> {
     let path = config_path()?;
     load_config_from_path(&path)
 }
 
-fn load_config_from_path(path: &Path) -> Result<Option<AppConfig>> {
+fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(ConfigLoadOutcome::default()),
         Err(err) => return Err(err.into()),
     };
-    let config = toml::from_str::<AppConfig>(&contents)?;
-    Ok(Some(config))
+
+    let value: Value = toml::from_str(&contents)?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| anyhow!("Config root must be a TOML table"))?;
+
+    let mut config = AppConfig::default();
+    let mut warnings = Vec::new();
+
+    if let Some(theme) = table.get("theme") {
+        if let Some(theme_str) = theme.as_str() {
+            config.theme = Some(theme_str.to_string());
+        } else {
+            warnings
+                .push("Warning: Config key 'theme' must be a string; ignoring value".to_string());
+        }
+    }
+
+    for key in table.keys() {
+        if key != "theme" {
+            warnings.push(format!("Warning: Unknown config key '{key}', ignoring"));
+        }
+    }
+
+    Ok(ConfigLoadOutcome {
+        config: Some(config),
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -81,8 +114,9 @@ mod tests {
     fn should_return_none_when_config_file_missing() {
         let dir = tempdir().expect("failed to create temp dir");
         let path = dir.path().join("config.toml");
-        let config = load_config_from_path(&path).expect("missing config should not fail");
-        assert!(config.is_none());
+        let outcome = load_config_from_path(&path).expect("missing config should not fail");
+        assert_eq!(outcome.config, None);
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -91,10 +125,12 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(&path, "theme = \"light\"\n").expect("failed to write config");
 
-        let config = load_config_from_path(&path)
-            .expect("valid config should parse")
-            .expect("config should exist");
-        assert_eq!(config.theme.as_deref(), Some("light"));
+        let outcome = load_config_from_path(&path).expect("valid config should parse");
+        assert_eq!(
+            outcome.config.as_ref().and_then(|cfg| cfg.theme.as_deref()),
+            Some("light")
+        );
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -103,10 +139,9 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(&path, "").expect("failed to write config");
 
-        let config = load_config_from_path(&path)
-            .expect("empty config should parse")
-            .expect("config should exist");
-        assert_eq!(config, AppConfig::default());
+        let outcome = load_config_from_path(&path).expect("empty config should parse");
+        assert_eq!(outcome.config, Some(AppConfig::default()));
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -120,13 +155,51 @@ mod tests {
     }
 
     #[test]
-    fn should_error_on_unknown_keys() {
+    fn should_warn_on_unknown_keys_and_keep_known_values() {
         let dir = tempdir().expect("failed to create temp dir");
         let path = dir.path().join("config.toml");
-        fs::write(&path, "themes = \"light\"\n").expect("failed to write config");
+        fs::write(&path, "theme = \"light\"\nthemes = \"typo\"\n").expect("failed to write config");
 
-        let result = load_config_from_path(&path);
-        assert!(result.is_err(), "unknown keys should return error");
+        let outcome = load_config_from_path(&path).expect("config should parse");
+        assert_eq!(
+            outcome.config.as_ref().and_then(|cfg| cfg.theme.as_deref()),
+            Some("light")
+        );
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            outcome.warnings[0],
+            "Warning: Unknown config key 'themes', ignoring"
+        );
+    }
+
+    #[test]
+    fn should_warn_on_unknown_keys_only_and_use_defaults() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "themes = \"typo\"\n").expect("failed to write config");
+
+        let outcome = load_config_from_path(&path).expect("config should parse");
+        assert_eq!(outcome.config, Some(AppConfig::default()));
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            outcome.warnings[0],
+            "Warning: Unknown config key 'themes', ignoring"
+        );
+    }
+
+    #[test]
+    fn should_warn_and_ignore_theme_with_invalid_type() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "theme = 123\n").expect("failed to write config");
+
+        let outcome = load_config_from_path(&path).expect("config should parse");
+        assert_eq!(outcome.config, Some(AppConfig::default()));
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            outcome.warnings[0],
+            "Warning: Config key 'theme' must be a string; ignoring value"
+        );
     }
 
     #[cfg(not(windows))]
