@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
@@ -13,9 +13,9 @@ use crate::ui::styles;
 pub fn build_message_span(message: Option<&Message>, theme: &Theme) -> (Span<'static>, usize) {
     if let Some(msg) = message {
         let (fg, bg) = match msg.message_type {
-            MessageType::Info => (Color::Black, Color::Cyan),
-            MessageType::Warning => (Color::Black, theme.pending),
-            MessageType::Error => (Color::White, theme.comment_issue),
+            MessageType::Info => (theme.message_info_fg, theme.message_info_bg),
+            MessageType::Warning => (theme.message_warning_fg, theme.message_warning_bg),
+            MessageType::Error => (theme.message_error_fg, theme.message_error_bg),
         };
         let content = format!(" {} ", msg.content);
         let width = content.len();
@@ -102,8 +102,8 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     text,
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(theme.pending)
+                        .fg(theme.update_badge_fg)
+                        .bg(theme.update_badge_bg)
                         .add_modifier(Modifier::BOLD),
                 ),
                 width,
@@ -115,8 +115,8 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     text,
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(theme.pending)
+                        .fg(theme.update_badge_fg)
+                        .bg(theme.update_badge_bg)
                         .add_modifier(Modifier::BOLD),
                 ),
                 width,
@@ -229,4 +229,49 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         .block(Block::default());
 
     frame.render_widget(status, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_message(message_type: MessageType) -> Message {
+        Message {
+            content: "hello".to_string(),
+            message_type,
+        }
+    }
+
+    #[test]
+    fn should_style_info_message_using_theme_fields() {
+        let theme = Theme::dark();
+        let (span, width) = build_message_span(Some(&test_message(MessageType::Info)), &theme);
+        assert_eq!(span.style.fg, Some(theme.message_info_fg));
+        assert_eq!(span.style.bg, Some(theme.message_info_bg));
+        assert_eq!(width, " hello ".len());
+    }
+
+    #[test]
+    fn should_return_empty_span_when_message_is_none() {
+        let theme = Theme::dark();
+        let (span, width) = build_message_span(None, &theme);
+        assert_eq!(span.content.as_ref(), "");
+        assert_eq!(width, 0);
+    }
+
+    #[test]
+    fn should_style_warning_message_using_theme_fields() {
+        let theme = Theme::dark();
+        let (span, _) = build_message_span(Some(&test_message(MessageType::Warning)), &theme);
+        assert_eq!(span.style.fg, Some(theme.message_warning_fg));
+        assert_eq!(span.style.bg, Some(theme.message_warning_bg));
+    }
+
+    #[test]
+    fn should_style_error_message_using_theme_fields() {
+        let theme = Theme::dark();
+        let (span, _) = build_message_span(Some(&test_message(MessageType::Error)), &theme);
+        assert_eq!(span.style.fg, Some(theme.message_error_fg));
+        assert_eq!(span.style.bg, Some(theme.message_error_bg));
+    }
 }

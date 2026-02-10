@@ -13,8 +13,12 @@ tuicr is a Rust terminal UI application for code reviews. Here's the module stru
 ```
 src/
 ├── main.rs              # Entry point, event loop, action dispatch
+├── config/
+│   └── mod.rs           # User config loading (XDG on Unix, %APPDATA% on Windows)
 ├── app.rs               # Application state (App struct, InputMode, etc.)
 ├── error.rs             # Error types (TuicrError enum)
+├── theme/
+│   └── mod.rs           # Theme palette definitions + CLI theme parsing/resolution
 │
 ├── vcs/                 # VCS abstraction layer
 │   ├── mod.rs           # detect_vcs(): auto-detect VCS (jj first, then git, then hg)
@@ -91,7 +95,7 @@ src/
 
 ### Data Flow
 
-1. **Startup**: `App::new()` calls `detect_vcs()` (Jujutsu first, then Git, then Mercurial), then enters commit selection mode by default. If uncommitted changes exist, the first selection row is "Uncommitted changes". With `-r/--revisions`, it opens the requested commit range directly.
+1. **Startup**: Parse CLI args (invalid `--theme` exits non-zero), load config from `$XDG_CONFIG_HOME/tuicr/config.toml` (default `~/.config/tuicr/config.toml`, or `%APPDATA%\tuicr\config.toml` on Windows), reject unknown config keys, resolve theme precedence (`--theme` > config > dark), then call `App::new()`. `App::new()` calls `detect_vcs()` (Jujutsu first, then Git, then Mercurial), then enters commit selection mode by default. If uncommitted changes exist, the first selection row is "Uncommitted changes". With `-r/--revisions`, it opens the requested commit range directly.
 2. **Render**: `ui::render()` draws the TUI based on `App` state
 3. **Input**: `crossterm` events → `map_key_to_action` → match on Action in main loop
 4. **Persistence**: `:w` calls `save_session()`, writes JSON to `~/.local/share/tuicr/reviews/`
@@ -111,6 +115,7 @@ src/
 - `ratatui` + `crossterm`: TUI framework
 - `git2`: Native git operations
 - `serde` + `serde_json`: Session serialization
+- `toml`: User config parsing
 - `arboard`: Clipboard access
 - `chrono`: Timestamps
 - `thiserror` + `anyhow`: Error handling

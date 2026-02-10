@@ -203,6 +203,7 @@ pub fn render_confirm_dialog(frame: &mut Frame, app: &App, message: &str) {
     let block = Block::default()
         .title(" Confirm ")
         .borders(Borders::ALL)
+        .style(styles::popup_style(theme))
         .border_style(styles::border_style(theme, true));
 
     let inner = block.inner(area);
@@ -220,7 +221,9 @@ pub fn render_confirm_dialog(frame: &mut Frame, app: &App, message: &str) {
         ]),
     ];
 
-    let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+    let paragraph = Paragraph::new(lines)
+        .style(styles::popup_style(theme))
+        .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(paragraph, inner);
 }
 

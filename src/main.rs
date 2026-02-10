@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod error;
 mod handler;
 mod input;
@@ -37,7 +38,7 @@ use handler::{
     handle_file_list_action, handle_help_action, handle_search_action, handle_visual_action,
 };
 use input::{Action, map_key_to_action};
-use theme::{parse_cli_args, resolve_theme};
+use theme::{parse_cli_args, resolve_theme_with_config};
 
 /// Timeout for the "press Ctrl+C again to exit" feature
 const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -58,7 +59,19 @@ fn main() -> anyhow::Result<()> {
     // Parse CLI arguments and resolve theme
     // This also configures syntax highlighting colors before diff parsing
     let cli_args = parse_cli_args();
-    let theme = resolve_theme(cli_args.theme);
+    let mut startup_warnings = Vec::new();
+    let config = match config::load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            startup_warnings.push(format!("Failed to load config: {e}"));
+            None
+        }
+    };
+    let (theme, theme_warnings) = resolve_theme_with_config(
+        cli_args.theme,
+        config.as_ref().and_then(|cfg| cfg.theme.as_deref()),
+    );
+    startup_warnings.extend(theme_warnings);
 
     // Start update check in background (non-blocking)
     let update_rx = if !cli_args.no_update_check {
@@ -80,6 +93,9 @@ fn main() -> anyhow::Result<()> {
     ) {
         Ok(mut app) => {
             app.supports_keyboard_enhancement = keyboard_enhancement_supported;
+            if let Some(message) = startup_warnings.first() {
+                app.set_warning(message.clone());
+            }
             app
         }
         Err(e) => {

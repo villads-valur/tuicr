@@ -91,14 +91,34 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 | Flag | Description |
 |------|-------------|
 | `-r` / `--revisions <REVSET>` | Commit range/Revision set to review. Exact syntax depends on VCS backend (Git, JJ, Hg) |
-| `--theme dark` | Use dark color theme (default) |
-| `--theme light` | Use light color theme for light terminal backgrounds |
+| `--theme <THEME>` | Color theme override (`dark`, `light`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`) |
 | `--stdout` | Output to stdout instead of clipboard when exporting |
 | `--no-update-check` | Skip checking for updates on startup |
 
 By default, `tuicr` starts in commit selection mode.  
 If uncommitted changes exist, the first selectable entry is `Uncommitted changes`.  
 When `-r` / `--revisions` is provided, `tuicr` opens that revision range directly.
+
+### Configuration
+
+Set a default theme in:
+- Linux/macOS: `$XDG_CONFIG_HOME/tuicr/config.toml` (default: `~/.config/tuicr/config.toml`)
+- Windows: `%APPDATA%\tuicr\config.toml`
+
+Example:
+
+```toml
+theme = "catppuccin-mocha"
+```
+
+Theme resolution precedence:
+1. `--theme <THEME>`
+2. Config file path above (OS-specific)
+3. built-in default (`dark`)
+
+Notes:
+- Invalid `--theme` values cause an immediate non-zero exit.
+- Unknown keys in `config.toml` are rejected.
 
 ### Keybindings
 

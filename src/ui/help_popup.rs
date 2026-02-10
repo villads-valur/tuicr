@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -19,6 +19,7 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(" Help (j/k to scroll) - Press ? or Esc to close ")
         .borders(Borders::ALL)
+        .style(styles::popup_style(theme))
         .border_style(styles::border_style(theme, true));
 
     let inner = block.inner(area);
@@ -471,11 +472,11 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         .take(viewport_height)
         .collect();
 
-    let paragraph = Paragraph::new(visible_lines);
+    let paragraph = Paragraph::new(visible_lines).style(styles::popup_style(theme));
     frame.render_widget(paragraph, inner);
 
     // Render scroll indicators
-    let indicator_style = Style::default().fg(Color::DarkGray);
+    let indicator_style = styles::help_indicator_style(theme);
 
     if can_scroll_up {
         let up_indicator = Paragraph::new(Line::from(Span::styled("▲ more", indicator_style)));
