@@ -738,6 +738,62 @@ mod tests {
     }
 
     #[test]
+    fn should_parse_pr_flag() {
+        let parsed = parse_for_test(&["tuicr", "--pr"]).expect("parse should succeed");
+        assert!(parsed.pr_mode);
+        assert!(parsed.pr_base_ref.is_none());
+    }
+
+    #[test]
+    fn should_parse_base_with_separate_value() {
+        let parsed =
+            parse_for_test(&["tuicr", "--base", "origin/main"]).expect("parse should succeed");
+        assert!(parsed.pr_mode);
+        assert_eq!(parsed.pr_base_ref.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn should_parse_base_with_equals_value() {
+        let parsed =
+            parse_for_test(&["tuicr", "--base=origin/main"]).expect("parse should succeed");
+        assert!(parsed.pr_mode);
+        assert_eq!(parsed.pr_base_ref.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn should_imply_pr_mode_when_base_is_provided() {
+        let parsed =
+            parse_for_test(&["tuicr", "--base", "origin/main"]).expect("parse should succeed");
+        assert!(parsed.pr_mode);
+    }
+
+    #[test]
+    fn should_error_when_base_value_missing() {
+        let err = parse_for_test(&["tuicr", "--base"]).expect_err("parse should fail");
+        assert!(err.contains("--base requires a value"));
+    }
+
+    #[test]
+    fn should_error_when_base_equals_value_empty() {
+        let err = parse_for_test(&["tuicr", "--base="]).expect_err("parse should fail");
+        assert!(err.contains("--base requires a value"));
+    }
+
+    #[test]
+    fn should_error_when_pr_combined_with_revisions() {
+        let err = parse_for_test(&["tuicr", "--pr", "-r", "HEAD~3..HEAD"])
+            .expect_err("parse should fail");
+        assert!(err.contains("--pr/--base cannot be combined with --revisions"));
+    }
+
+    #[test]
+    fn should_error_when_base_combined_with_revisions() {
+        let err = parse_for_test(&["tuicr", "--base", "origin/main", "-r", "HEAD~3..HEAD"])
+            .expect_err("parse should fail");
+        assert!(err.contains("--pr/--base cannot be combined with --revisions"));
+    }
+
+    #[test]
     fn should_roundtrip_all_canonical_theme_values() {
         for (name, expected_theme) in ThemeArg::choices() {
             assert_eq!(ThemeArg::from_str(name), Some(*expected_theme));
