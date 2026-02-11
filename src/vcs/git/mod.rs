@@ -13,7 +13,7 @@ use super::traits::{CommitInfo, VcsBackend, VcsInfo, VcsType};
 
 // Re-export commonly used functions
 pub use context::{calculate_gap, fetch_context_lines};
-pub use diff::{get_commit_range_diff, get_working_tree_diff};
+pub use diff::{get_commit_range_diff, get_working_tree_diff, get_working_tree_with_commits_diff};
 
 /// Git backend implementation using git2 library
 pub struct GitBackend {
@@ -77,18 +77,23 @@ impl VcsBackend for GitBackend {
         fetch_context_lines(&self.repo, file_path, file_status, start_line, end_line)
     }
 
-    fn get_recent_commits(&self, count: usize) -> Result<Vec<CommitInfo>> {
-        let git_commits = repository::get_recent_commits(&self.repo, count)?;
+    fn get_recent_commits(&self, offset: usize, limit: usize) -> Result<Vec<CommitInfo>> {
+        let git_commits = repository::get_recent_commits(&self.repo, offset, limit)?;
         Ok(git_commits
             .into_iter()
             .map(|c| CommitInfo {
                 id: c.id,
                 short_id: c.short_id,
+                branch_name: c.branch_name,
                 summary: c.summary,
                 author: c.author,
                 time: c.time,
             })
             .collect())
+    }
+
+    fn resolve_revisions(&self, revisions: &str) -> Result<Vec<String>> {
+        repository::resolve_revisions(&self.repo, revisions)
     }
 
     fn get_commit_range_diff(
@@ -97,5 +102,28 @@ impl VcsBackend for GitBackend {
         highlighter: &SyntaxHighlighter,
     ) -> Result<Vec<DiffFile>> {
         get_commit_range_diff(&self.repo, commit_ids, highlighter)
+    }
+
+    fn get_commits_info(&self, ids: &[String]) -> Result<Vec<CommitInfo>> {
+        let git_commits = repository::get_commits_info(&self.repo, ids)?;
+        Ok(git_commits
+            .into_iter()
+            .map(|c| CommitInfo {
+                id: c.id,
+                short_id: c.short_id,
+                branch_name: c.branch_name,
+                summary: c.summary,
+                author: c.author,
+                time: c.time,
+            })
+            .collect())
+    }
+
+    fn get_working_tree_with_commits_diff(
+        &self,
+        commit_ids: &[String],
+        highlighter: &SyntaxHighlighter,
+    ) -> Result<Vec<DiffFile>> {
+        get_working_tree_with_commits_diff(&self.repo, commit_ids, highlighter)
     }
 }

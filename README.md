@@ -55,6 +55,12 @@ brew install agavra/tap/tuicr
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/agavra/tuicr/releases).
 
+### Mise (macOS/Linux/Windows)
+
+```
+mise use github:agavra/tuicr
+```
+
 ### From crates.io
 
 ```bash
@@ -84,8 +90,35 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 
 | Flag | Description |
 |------|-------------|
-| `--theme dark` | Use dark color theme (default) |
-| `--theme light` | Use light color theme for light terminal backgrounds |
+| `-r` / `--revisions <REVSET>` | Commit range/Revision set to review. Exact syntax depends on VCS backend (Git, JJ, Hg) |
+| `--theme <THEME>` | Color theme override (`dark`, `light`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`) |
+| `--stdout` | Output to stdout instead of clipboard when exporting |
+| `--no-update-check` | Skip checking for updates on startup |
+
+By default, `tuicr` starts in commit selection mode.  
+If uncommitted changes exist, the first selectable entry is `Uncommitted changes`.  
+When `-r` / `--revisions` is provided, `tuicr` opens that revision range directly.
+
+### Configuration
+
+Set a default theme in:
+- Linux/macOS: `$XDG_CONFIG_HOME/tuicr/config.toml` (default: `~/.config/tuicr/config.toml`)
+- Windows: `%APPDATA%\tuicr\config.toml`
+
+Example:
+
+```toml
+theme = "catppuccin-mocha"
+```
+
+Theme resolution precedence:
+1. `--theme <THEME>`
+2. Config file path above (OS-specific)
+3. built-in default (`dark`)
+
+Notes:
+- Invalid `--theme` values cause an immediate non-zero exit.
+- Unknown keys in `config.toml` are ignored with a startup warning.
 
 ### Keybindings
 
@@ -102,16 +135,29 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 | `g` / `G` | Go to first/last file |
 | `{` / `}` | Jump to previous/next file |
 | `[` / `]` | Jump to previous/next hunk |
+| `/` | Search within diff |
+| `n` / `N` | Next/previous search match |
 | `Enter` | Expand/collapse hidden context between hunks |
 | `zz` | Center cursor on screen |
+
+#### File Tree
+
+| Key | Action |
+|-----|--------|
+| `Space` | Toggle expand directory |
+| `Enter` | Expand directory / Jump to file in diff |
+| `o` | Expand all directories |
+| `O` | Collapse all directories |
 
 #### Panel Focus
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Toggle focus between file list and diff |
+| `Tab` | Toggle focus between file list, diff, and commit selector |
 | `;h` | Focus file list (left panel) |
 | `;l` | Focus diff view (right panel) |
+| `;k` | Focus commit selector (top panel) |
+| `;j` | Focus diff view |
 | `;e` | Toggle file list visibility |
 | `Enter` | Select file (when file list is focused) |
 
@@ -149,18 +195,28 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 
 #### Commands
 
-| Key | Action |
-|-----|--------|
+| Command | Action |
+|---------|--------|
 | `:w` | Save session |
 | `:e` (`:reload`) | Reload diff files |
 | `:clip` (`:export`) | Copy review to clipboard |
 | `:diff` | Toggle diff view (unified / side-by-side) |
-| `:q` | Quit |
+| `:commits` | Select commits to review |
+| `:set wrap` | Enable line wrap in diff view |
+| `:set wrap!` | Toggle line wrap in diff view |
+| `:set commits` | Show inline commit selector |
+| `:set nocommits` | Hide inline commit selector |
+| `:set commits!` | Toggle inline commit selector |
+| `:clear` | Clear all comments |
+| `:version` | Show tuicr version |
+| `:update` | Check for updates |
+| `:q` | Quit (warns if unsaved) |
+| `:q!` | Force quit |
 | `:x` / `:wq` | Save and quit (prompts to copy if comments exist) |
 | `?` | Toggle help |
 | `q` | Quick quit |
 
-#### Commit Selection (when no unstaged changes)
+#### Commit Selection (startup)
 
 | Key | Action |
 |-----|--------|
@@ -168,6 +224,17 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 | `Space` | Toggle commit selection |
 | `Enter` | Confirm and load diff |
 | `q` / `Esc` | Quit |
+
+#### Inline Commit Selector (multi-commit reviews)
+
+When reviewing multiple commits, an inline commit selector panel appears at the top of the diff view. Focus it with `;k` or `Tab`.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate commits |
+| `Space` / `Enter` | Toggle commit selection (updates diff) |
+| `(` / `)` | Cycle through individual commits |
+| `Esc` | Return focus to diff |
 
 #### Confirm Dialogs
 
@@ -195,3 +262,21 @@ Each comment is numbered and self-contained with its file path and line number o
 ## Session Persistence
 
 Sessions are automatically saved to `~/.local/share/tuicr/reviews/` (XDG compliant). When you reopen `tuicr` in the same repository, your previous review progress (comments, reviewed status) is restored.
+
+## Claude Code Integration
+
+tuicr includes a skill for [Claude Code](https://claude.ai/claude-code) that opens tuicr in a tmux split pane, letting you review changes interactively and feed comments back to Claude.
+
+**Prerequisites:** Claude Code running inside tmux, tuicr installed.
+
+**Installation** (choose one):
+
+```bash
+# Option 1: Copy to local skills
+cp -r /path/to/tuicr/.claude/skill ~/.claude/skills/tuicr
+
+# Option 2: Point Claude to this repo
+claude skill add /path/to/tuicr/.claude/skill
+```
+
+**Usage:** `/tuicr` or ask Claude to "review my changes with tuicr".

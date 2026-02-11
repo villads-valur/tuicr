@@ -1,7 +1,29 @@
 use crate::app::{self, App, FileTreeItem, FocusedPanel};
 use crate::input::Action;
-use crate::output::export_to_clipboard;
+use crate::output::{export_to_clipboard, generate_export_content};
 use crate::persistence::save_session;
+use crate::text_edit::{
+    delete_char_before, delete_word_before, next_char_boundary, prev_char_boundary,
+};
+
+/// Export review: either to clipboard or set pending stdout output based on app.output_to_stdout.
+/// When output_to_stdout is true, stores the content and sets should_quit.
+fn handle_export(app: &mut App) {
+    if app.output_to_stdout {
+        match generate_export_content(&app.session, &app.diff_source) {
+            Ok(content) => {
+                app.pending_stdout_output = Some(content);
+                app.should_quit = true;
+            }
+            Err(e) => app.set_warning(format!("{e}")),
+        }
+    } else {
+        match export_to_clipboard(&app.session, &app.diff_source) {
+            Ok(msg) => app.set_message(msg),
+            Err(e) => app.set_warning(format!("{e}")),
+        }
+    }
+}
 
 fn comment_line_start(buffer: &str, cursor: usize) -> usize {
     let cursor = cursor.min(buffer.len());
@@ -99,8 +121,6 @@ pub fn handle_help_action(app: &mut App, action: Action) {
         Action::PageUp => app.help_scroll_up(app.help_state.viewport_height),
         Action::GoToTop => app.help_scroll_to_top(),
         Action::GoToBottom => app.help_scroll_to_bottom(),
-        Action::MouseScrollDown(n) => app.help_scroll_down(n),
-        Action::MouseScrollUp(n) => app.help_scroll_up(n),
         Action::ToggleHelp => app.toggle_help(),
         Action::Quit => app.should_quit = true,
         _ => {}
@@ -137,6 +157,11 @@ pub fn handle_command_action(app: &mut App, action: Action) {
                     Ok(_) => {
                         app.dirty = false;
                         if app.session.has_comments() {
+                            if app.output_to_stdout {
+                                // Skip confirmation dialog, export directly
+                                handle_export(app);
+                                return;
+                            }
                             app.exit_command_mode();
                             app.enter_confirm_mode(app::ConfirmAction::CopyAndQuit);
                             return;
@@ -150,16 +175,58 @@ pub fn handle_command_action(app: &mut App, action: Action) {
                     Ok(count) => app.set_message(format!("Reloaded {count} files")),
                     Err(e) => app.set_error(format!("Reload failed: {e}")),
                 },
-                "clip" | "export" => match export_to_clipboard(&app.session, &app.diff_source) {
-                    Ok(msg) => app.set_message(msg),
-                    Err(e) => app.set_warning(format!("{e}")),
-                },
+                "clip" | "export" => handle_export(app),
                 "clear" => app.clear_all_comments(),
                 "version" => {
                     app.set_message(format!("tuicr v{}", env!("CARGO_PKG_VERSION")));
                 }
+                "update" => match crate::update::check_for_updates() {
+                    crate::update::UpdateCheckResult::UpdateAvailable(info) => {
+                        app.set_message(format!(
+                            "Update available: v{} -> v{}",
+                            info.current_version, info.latest_version
+                        ));
+                    }
+                    crate::update::UpdateCheckResult::UpToDate(info) => {
+                        app.set_message(format!("tuicr v{} is up to date", info.current_version));
+                    }
+                    crate::update::UpdateCheckResult::AheadOfRelease(info) => {
+                        app.set_message(format!(
+                            "You're from the future! v{} > v{}",
+                            info.current_version, info.latest_version
+                        ));
+                    }
+                    crate::update::UpdateCheckResult::Failed(err) => {
+                        app.set_warning(format!("Update check failed: {err}"));
+                    }
+                },
                 "set wrap" => app.set_diff_wrap(true),
                 "set wrap!" => app.toggle_diff_wrap(),
+                "set commits" => {
+                    app.show_commit_selector = true;
+                    app.set_message("Commit selector: visible");
+                }
+                "set nocommits" => {
+                    app.show_commit_selector = false;
+                    if app.focused_panel == FocusedPanel::CommitSelector {
+                        app.focused_panel = FocusedPanel::Diff;
+                    }
+                    app.set_message("Commit selector: hidden");
+                }
+                "set commits!" => {
+                    app.show_commit_selector = !app.show_commit_selector;
+                    if !app.show_commit_selector
+                        && app.focused_panel == FocusedPanel::CommitSelector
+                    {
+                        app.focused_panel = FocusedPanel::Diff;
+                    }
+                    let status = if app.show_commit_selector {
+                        "visible"
+                    } else {
+                        "hidden"
+                    };
+                    app.set_message(format!("Commit selector: {status}"));
+                }
                 "diff" => app.toggle_diff_view_mode(),
                 "commits" => {
                     if let Err(e) = app.enter_commit_select_mode() {
@@ -224,26 +291,19 @@ pub fn handle_comment_action(app: &mut App, action: Action) {
     match action {
         Action::InsertChar(c) => {
             app.comment_buffer.insert(app.comment_cursor, c);
-            app.comment_cursor += 1;
+            app.comment_cursor += c.len_utf8();
         }
         Action::DeleteChar => {
-            if app.comment_cursor > 0 {
-                app.comment_cursor -= 1;
-                app.comment_buffer.remove(app.comment_cursor);
-            }
+            app.comment_cursor = delete_char_before(&mut app.comment_buffer, app.comment_cursor);
         }
         Action::ExitMode => app.exit_comment_mode(),
         Action::SubmitInput => app.save_comment(),
         Action::CycleCommentType => app.cycle_comment_type(),
         Action::TextCursorLeft => {
-            if app.comment_cursor > 0 {
-                app.comment_cursor -= 1;
-            }
+            app.comment_cursor = prev_char_boundary(&app.comment_buffer, app.comment_cursor);
         }
         Action::TextCursorRight => {
-            if app.comment_cursor < app.comment_buffer.len() {
-                app.comment_cursor += 1;
-            }
+            app.comment_cursor = next_char_boundary(&app.comment_buffer, app.comment_cursor);
         }
         Action::TextCursorLineStart => {
             app.comment_cursor = comment_line_start(&app.comment_buffer, app.comment_cursor);
@@ -258,31 +318,7 @@ pub fn handle_comment_action(app: &mut App, action: Action) {
             app.comment_cursor = comment_word_right(&app.comment_buffer, app.comment_cursor);
         }
         Action::DeleteWord => {
-            if app.comment_cursor > 0 {
-                // Delete backwards to start of word or start of buffer
-                while app.comment_cursor > 0
-                    && app
-                        .comment_buffer
-                        .chars()
-                        .nth(app.comment_cursor - 1)
-                        .map(|c| c.is_whitespace())
-                        .unwrap_or(false)
-                {
-                    app.comment_cursor -= 1;
-                    app.comment_buffer.remove(app.comment_cursor);
-                }
-                while app.comment_cursor > 0
-                    && app
-                        .comment_buffer
-                        .chars()
-                        .nth(app.comment_cursor - 1)
-                        .map(|c| !c.is_whitespace())
-                        .unwrap_or(false)
-                {
-                    app.comment_cursor -= 1;
-                    app.comment_buffer.remove(app.comment_cursor);
-                }
-            }
+            app.comment_cursor = delete_word_before(&mut app.comment_buffer, app.comment_cursor);
         }
         Action::ClearLine => {
             app.comment_buffer.clear();
@@ -298,9 +334,16 @@ pub fn handle_confirm_action(app: &mut App, action: Action) {
     match action {
         Action::ConfirmYes => {
             if let Some(app::ConfirmAction::CopyAndQuit) = app.pending_confirm {
-                match export_to_clipboard(&app.session, &app.diff_source) {
-                    Ok(msg) => app.set_message(msg),
-                    Err(e) => app.set_warning(format!("{e}")),
+                if app.output_to_stdout {
+                    match generate_export_content(&app.session, &app.diff_source) {
+                        Ok(content) => app.pending_stdout_output = Some(content),
+                        Err(e) => app.set_warning(format!("{e}")),
+                    }
+                } else {
+                    match export_to_clipboard(&app.session, &app.diff_source) {
+                        Ok(msg) => app.set_message(msg),
+                        Err(e) => app.set_warning(format!("{e}")),
+                    }
                 }
             }
             app.exit_confirm_mode();
@@ -320,9 +363,23 @@ pub fn handle_commit_select_action(app: &mut App, action: Action) {
     match action {
         Action::CommitSelectUp => app.commit_select_up(),
         Action::CommitSelectDown => app.commit_select_down(),
-        Action::ToggleCommitSelect => app.toggle_commit_selection(),
+        Action::ToggleCommitSelect => {
+            // If on expand row, expand commits instead of toggling selection
+            if app.is_on_expand_row() {
+                if let Err(e) = app.expand_commit() {
+                    app.set_error(format!("Failed to load commits: {e}"));
+                }
+            } else {
+                app.toggle_commit_selection()
+            }
+        }
         Action::ConfirmCommitSelect => {
-            if let Err(e) = app.confirm_commit_selection() {
+            // if on expand row, expand commit instead of confirming
+            if app.is_on_expand_row() {
+                if let Err(e) = app.expand_commit() {
+                    app.set_error(format!("Failed to load commits: {e}"));
+                }
+            } else if let Err(e) = app.confirm_commit_selection() {
                 app.set_error(format!("Failed to load commits: {e}"));
             }
         }
@@ -333,6 +390,25 @@ pub fn handle_commit_select_action(app: &mut App, action: Action) {
         }
         Action::Quit => app.should_quit = true,
         _ => {}
+    }
+}
+
+/// Handle actions when inline commit selector panel is focused
+pub fn handle_commit_selector_action(app: &mut App, action: Action) {
+    match action {
+        Action::CursorDown(_) => app.commit_select_down(),
+        Action::CursorUp(_) => app.commit_select_up(),
+        // Space/Enter toggle selection
+        Action::ToggleExpand | Action::ToggleCommitSelect | Action::SelectFile => {
+            app.toggle_commit_selection();
+            if let Err(e) = app.reload_inline_selection() {
+                app.set_error(format!("Failed to load diff: {e}"));
+            }
+        }
+        Action::ExitMode => {
+            app.focused_panel = FocusedPanel::Diff;
+        }
+        _ => handle_shared_normal_action(app, action),
     }
 }
 
@@ -380,13 +456,14 @@ pub fn handle_file_list_action(app: &mut App, action: Action) {
         Action::CursorUp(n) => app.file_list_up(n),
         Action::ScrollLeft(n) => app.file_list_state.scroll_left(n),
         Action::ScrollRight(n) => app.file_list_state.scroll_right(n),
-        Action::MouseScrollDown(n) => app.file_list_viewport_scroll_down(n),
-        Action::MouseScrollUp(n) => app.file_list_viewport_scroll_up(n),
         Action::SelectFile | Action::ToggleExpand => {
             if let Some(item) = app.get_selected_tree_item() {
                 match item {
                     FileTreeItem::Directory { path, .. } => app.toggle_directory(&path),
-                    FileTreeItem::File { file_idx, .. } => app.jump_to_file(file_idx),
+                    FileTreeItem::File { file_idx, .. } => {
+                        app.jump_to_file(file_idx);
+                        app.focused_panel = FocusedPanel::Diff;
+                    }
                 }
             }
         }
@@ -408,8 +485,6 @@ pub fn handle_diff_action(app: &mut App, action: Action) {
         Action::CursorUp(n) => app.cursor_up(n),
         Action::ScrollLeft(n) => app.scroll_left(n),
         Action::ScrollRight(n) => app.scroll_right(n),
-        Action::MouseScrollDown(n) => app.viewport_scroll_down(n),
-        Action::MouseScrollUp(n) => app.viewport_scroll_up(n),
         Action::SelectFile => {
             // Check if cursor is on an expander line or expanded content
             if let Some((gap_id, is_expanded)) = app.get_gap_at_cursor() {
@@ -459,9 +534,12 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
         Action::PrevHunk => app.prev_hunk(),
         Action::ToggleReviewed => app.toggle_reviewed(),
         Action::ToggleFocus => {
-            app.focused_panel = match app.focused_panel {
-                FocusedPanel::FileList => FocusedPanel::Diff,
-                FocusedPanel::Diff => FocusedPanel::FileList,
+            let has_selector = app.has_inline_commit_selector();
+            app.focused_panel = match (app.focused_panel, has_selector) {
+                (FocusedPanel::FileList, _) => FocusedPanel::Diff,
+                (FocusedPanel::Diff, true) => FocusedPanel::CommitSelector,
+                (FocusedPanel::Diff, false) => FocusedPanel::FileList,
+                (FocusedPanel::CommitSelector, _) => FocusedPanel::FileList,
             };
         }
         Action::ExpandAll => {
@@ -489,10 +567,7 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
                 app.set_message("No comment at cursor");
             }
         }
-        Action::ExportToClipboard => match export_to_clipboard(&app.session, &app.diff_source) {
-            Ok(msg) => app.set_message(msg),
-            Err(e) => app.set_warning(format!("{e}")),
-        },
+        Action::ExportToClipboard => handle_export(app),
         Action::SearchNext => {
             app.search_next_in_diff();
         }
@@ -504,6 +579,22 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
                 app.enter_visual_mode(line, side);
             } else {
                 app.set_message("Move cursor to a diff line to start visual selection");
+            }
+        }
+        Action::CycleCommitNext => {
+            if app.has_inline_commit_selector() {
+                app.cycle_commit_next();
+                if let Err(e) = app.reload_inline_selection() {
+                    app.set_error(format!("Failed to load diff: {e}"));
+                }
+            }
+        }
+        Action::CycleCommitPrev => {
+            if app.has_inline_commit_selector() {
+                app.cycle_commit_prev();
+                if let Err(e) = app.reload_inline_selection() {
+                    app.set_error(format!("Failed to load diff: {e}"));
+                }
             }
         }
         _ => {}

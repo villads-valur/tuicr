@@ -55,6 +55,38 @@ pub fn get_commit_range_diff(
     parse_diff(&diff, highlighter)
 }
 
+/// Get a combined diff from the parent of the oldest commit through to the working tree.
+/// This shows both committed and uncommitted changes in a single diff.
+pub fn get_working_tree_with_commits_diff(
+    repo: &Repository,
+    commit_ids: &[String],
+    highlighter: &SyntaxHighlighter,
+) -> Result<Vec<DiffFile>> {
+    if commit_ids.is_empty() {
+        return Err(TuicrError::NoChanges);
+    }
+
+    // Find the oldest commit (first in our list since commits are oldest to newest)
+    let oldest_id = git2::Oid::from_str(&commit_ids[0])?;
+    let oldest_commit = repo.find_commit(oldest_id)?;
+
+    // Get the parent of the oldest commit, or use an empty tree if it's the initial commit
+    let old_tree = if oldest_commit.parent_count() > 0 {
+        Some(oldest_commit.parent(0)?.tree()?)
+    } else {
+        None
+    };
+
+    let mut opts = DiffOptions::new();
+    opts.include_untracked(true);
+    opts.show_untracked_content(true);
+    opts.recurse_untracked_dirs(true);
+
+    let diff = repo.diff_tree_to_workdir_with_index(old_tree.as_ref(), Some(&mut opts))?;
+
+    parse_diff(&diff, highlighter)
+}
+
 fn parse_diff(diff: &Diff, highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
     let mut files: Vec<DiffFile> = Vec::new();
 
@@ -144,10 +176,15 @@ fn parse_hunks(
             }
 
             // Apply syntax highlighting if we have a file path
-            let highlighted_lines = if let Some(path) = file_path {
-                highlighter.highlight_file_lines(path, &line_contents)
+            let highlight_sequences =
+                SyntaxHighlighter::split_diff_lines_for_highlighting(&line_contents, &line_origins);
+            let (old_highlighted_lines, new_highlighted_lines) = if let Some(path) = file_path {
+                (
+                    highlighter.highlight_file_lines(path, &highlight_sequences.old_lines),
+                    highlighter.highlight_file_lines(path, &highlight_sequences.new_lines),
+                )
             } else {
-                None
+                (None, None)
             };
 
             // Now create DiffLines with syntax highlighting applied
@@ -159,13 +196,13 @@ fn parse_hunks(
                 let origin = line_origins[line_idx];
 
                 // Get highlighted spans and apply diff background
-                let highlighted_spans = if let Some(ref all_highlighted) = highlighted_lines {
-                    all_highlighted
-                        .get(line_idx)
-                        .map(|spans| highlighter.apply_diff_background(spans.clone(), origin))
-                } else {
-                    None
-                };
+                let highlighted_spans = highlighter.highlighted_line_for_diff_with_background(
+                    old_highlighted_lines.as_deref(),
+                    new_highlighted_lines.as_deref(),
+                    highlight_sequences.old_line_indices[line_idx],
+                    highlight_sequences.new_line_indices[line_idx],
+                    origin,
+                );
 
                 lines.push(DiffLine {
                     origin,

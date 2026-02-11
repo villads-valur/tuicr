@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -19,6 +19,7 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(" Help (j/k to scroll) - Press ? or Esc to close ")
         .borders(Borders::ALL)
+        .style(styles::popup_style(theme))
         .border_style(styles::border_style(theme, true));
 
     let inner = block.inner(area);
@@ -109,10 +110,51 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(
+                "  ;k/;j     ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Focus commit selector/diff"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  ;e        ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("Toggle file list visibility"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Commit Selector (multi-commit reviews)",
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  j/k       ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Navigate commits"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Space/Enter",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Toggle commit selection (updates diff)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  (/)       ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Cycle through individual commits"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Esc       ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Return focus to diff"),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -245,10 +287,24 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(
+                "  Enter     ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Save comment"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  Ctrl-S    ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("Save comment"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Shift-Enter/Ctrl-J",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Insert newline"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -331,7 +387,28 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
                 "  :commits  ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Select commits to review"),
+            Span::raw("Select commits or uncommitted changes"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :set commits",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Show inline commit selector"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :set nocommits",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Hide inline commit selector"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :set commits!",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Toggle inline commit selector"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -353,6 +430,20 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("Save and quit"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :version  ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Show tuicr version"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :update   ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Check for updates"),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -381,11 +472,11 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         .take(viewport_height)
         .collect();
 
-    let paragraph = Paragraph::new(visible_lines);
+    let paragraph = Paragraph::new(visible_lines).style(styles::popup_style(theme));
     frame.render_widget(paragraph, inner);
 
     // Render scroll indicators
-    let indicator_style = Style::default().fg(Color::DarkGray);
+    let indicator_style = styles::help_indicator_style(theme);
 
     if can_scroll_up {
         let up_indicator = Paragraph::new(Line::from(Span::styled("▲ more", indicator_style)));

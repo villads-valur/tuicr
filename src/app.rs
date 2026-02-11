@@ -1,12 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use chrono::Utc;
+
 use crate::error::{Result, TuicrError};
-use crate::model::{Comment, CommentType, DiffFile, DiffLine, LineRange, LineSide, ReviewSession};
-use crate::persistence::{find_session_for_repo, load_session};
+use crate::model::{
+    Comment, CommentType, DiffFile, DiffLine, LineOrigin, LineRange, LineSide, ReviewSession,
+    SessionDiffSource,
+};
+use crate::persistence::load_latest_session_for_context;
 use crate::theme::Theme;
+use crate::update::UpdateInfo;
 use crate::vcs::git::calculate_gap;
 use crate::vcs::{CommitInfo, VcsBackend, VcsInfo, detect_vcs};
+
+const VISIBLE_COMMIT_COUNT: usize = 10;
+const COMMIT_PAGE_SIZE: usize = 10;
+pub const WORKING_TREE_SELECTION_ID: &str = "__tuicr_working_tree__";
 
 #[derive(Debug, Clone)]
 pub enum FileTreeItem {
@@ -50,6 +60,15 @@ pub enum AnnotatedLine {
         old_lineno: Option<u32>,
         new_lineno: Option<u32>,
     },
+    /// Side-by-side paired diff line
+    SideBySideLine {
+        file_idx: usize,
+        hunk_idx: usize,
+        del_line_idx: Option<usize>,
+        add_line_idx: Option<usize>,
+        old_lineno: Option<u32>,
+        new_lineno: Option<u32>,
+    },
     /// A line comment (part of a multi-line comment box)
     LineComment {
         file_idx: usize,
@@ -79,6 +98,7 @@ pub enum InputMode {
 pub enum DiffSource {
     WorkingTree,
     CommitRange(Vec<String>),
+    WorkingTreeAndCommits(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +110,7 @@ pub enum ConfirmAction {
 pub enum FocusedPanel {
     FileList,
     Diff,
+    CommitSelector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,9 +165,16 @@ pub struct App {
     // Commit selection state
     pub commit_list: Vec<CommitInfo>,
     pub commit_list_cursor: usize,
+    pub commit_list_scroll_offset: usize,
+    pub commit_list_viewport_height: usize,
     /// Selected commit range as (start_idx, end_idx) inclusive, where start <= end.
-    /// Indices refer to positions in commit_list (0 = newest/HEAD, higher = older).
+    /// Indices refer to positions in commit_list.
+    /// If uncommitted changes exist, index 0 is the working tree option.
     pub commit_selection_range: Option<(usize, usize)>,
+    /// State describing how many commits are currently shown and how pagination behaves.
+    pub visible_commit_count: usize,
+    pub commit_page_size: usize,
+    pub has_more_commit: bool,
 
     pub should_quit: bool,
     pub dirty: bool,
@@ -164,6 +192,27 @@ pub struct App {
     pub expanded_content: HashMap<GapId, Vec<DiffLine>>,
     /// Cached annotations describing what each rendered line represents
     pub line_annotations: Vec<AnnotatedLine>,
+    /// Output to stdout instead of clipboard when exporting
+    pub output_to_stdout: bool,
+    /// Pending output to print to stdout after TUI exits
+    pub pending_stdout_output: Option<String>,
+    /// Calculated screen position for comment input cursor (col, row) for IME positioning.
+    /// Set during render when in Comment mode, None otherwise.
+    pub comment_cursor_screen_pos: Option<(u16, u16)>,
+    /// Information about available updates (set by background check)
+    pub update_info: Option<UpdateInfo>,
+
+    // Inline commit selector state (shown at top of diff view for multi-commit reviews)
+    /// CommitInfo for commits in the current review (display order: newest first)
+    pub review_commits: Vec<CommitInfo>,
+    /// Whether the inline commit selector panel is visible
+    pub show_commit_selector: bool,
+    /// Cached individual/subrange diffs keyed by (start_idx, end_idx) into review_commits
+    pub commit_diff_cache: HashMap<(usize, usize), Vec<DiffFile>>,
+    /// The combined "all selected" diff, cached for quick restoration
+    pub range_diff_files: Option<Vec<DiffFile>>,
+    /// Saved inline selection range when entering full commit select mode via :commits
+    pub saved_inline_selection: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -247,145 +296,307 @@ enum CommentLocation {
 }
 
 impl App {
-    pub fn new(theme: Theme) -> Result<Self> {
+    pub fn new(theme: Theme, output_to_stdout: bool, revisions: Option<&str>) -> Result<Self> {
         let vcs = detect_vcs()?;
         let vcs_info = vcs.info().clone();
         let highlighter = theme.syntax_highlighter();
 
-        // Try to get working tree diff first
-        let diff_result = vcs.get_working_tree_diff(highlighter);
-
-        match diff_result {
-            Ok(diff_files) => {
-                // We have unstaged changes - normal flow
-                let mut session = Self::load_or_create_session(&vcs_info);
-
-                // Ensure all current diff files are in the session
-                for file in &diff_files {
-                    let path = file.display_path().clone();
-                    session.add_file(path, file.status);
-                }
-
-                let mut app = Self {
-                    theme,
-                    vcs,
-                    vcs_info,
-                    session,
-                    diff_files,
-                    diff_source: DiffSource::WorkingTree,
-                    input_mode: InputMode::Normal,
-                    focused_panel: FocusedPanel::Diff,
-                    diff_view_mode: DiffViewMode::Unified,
-                    file_list_state: FileListState::default(),
-                    diff_state: DiffState::default(),
-                    help_state: HelpState::default(),
-                    command_buffer: String::new(),
-                    search_buffer: String::new(),
-                    last_search_pattern: None,
-                    comment_buffer: String::new(),
-                    comment_cursor: 0,
-                    comment_type: CommentType::Note,
-                    comment_is_file_level: true,
-                    comment_line: None,
-                    editing_comment_id: None,
-                    visual_anchor: None,
-                    comment_line_range: None,
-                    commit_list: Vec::new(),
-                    commit_list_cursor: 0,
-                    commit_selection_range: None,
-                    should_quit: false,
-                    dirty: false,
-                    quit_warned: false,
-                    message: None,
-                    pending_confirm: None,
-                    supports_keyboard_enhancement: false,
-                    show_file_list: true,
-                    file_list_area: None,
-                    diff_area: None,
-                    expanded_dirs: HashSet::new(),
-                    expanded_gaps: HashSet::new(),
-                    expanded_content: HashMap::new(),
-                    line_annotations: Vec::new(),
-                };
-                app.sort_files_by_directory(true);
-                app.expand_all_dirs();
-                app.rebuild_annotations();
-                Ok(app)
+        // Determine the diff source, files, and session based on input.
+        // Three paths: CLI revisions, working tree changes, or commit selection fallback.
+        if let Some(revisions) = revisions {
+            // Resolve the revisions to commits and diff as a commit range
+            let commit_ids = vcs.resolve_revisions(revisions)?;
+            let diff_files = vcs.get_commit_range_diff(&commit_ids, highlighter)?;
+            if diff_files.is_empty() {
+                return Err(TuicrError::NoChanges);
             }
-            Err(TuicrError::NoChanges) => {
-                // No unstaged changes - try to get recent commits
-                let commits = vcs.get_recent_commits(5)?;
-                if commits.is_empty() {
-                    return Err(TuicrError::NoChanges);
-                }
+            let session = Self::load_or_create_commit_range_session(&vcs_info, &commit_ids);
+            // Get commit info for the inline commit selector
+            let review_commits = vcs.get_commits_info(&commit_ids)?;
+            // Reverse to newest-first display order
+            let review_commits: Vec<CommitInfo> = review_commits.into_iter().rev().collect();
 
-                let session =
-                    ReviewSession::new(vcs_info.root_path.clone(), vcs_info.head_commit.clone());
+            let mut app = Self::build(
+                vcs,
+                vcs_info,
+                theme,
+                output_to_stdout,
+                diff_files,
+                session,
+                DiffSource::CommitRange(commit_ids),
+                InputMode::Normal,
+                Vec::new(),
+            )?;
 
-                Ok(Self {
-                    theme,
-                    vcs,
-                    vcs_info,
-                    session,
-                    diff_files: Vec::new(),
-                    diff_source: DiffSource::WorkingTree,
-                    input_mode: InputMode::CommitSelect,
-                    focused_panel: FocusedPanel::Diff,
-                    diff_view_mode: DiffViewMode::Unified,
-                    file_list_state: FileListState::default(),
-                    diff_state: DiffState::default(),
-                    help_state: HelpState::default(),
-                    command_buffer: String::new(),
-                    search_buffer: String::new(),
-                    last_search_pattern: None,
-                    comment_buffer: String::new(),
-                    comment_cursor: 0,
-                    comment_type: CommentType::Note,
-                    comment_is_file_level: true,
-                    comment_line: None,
-                    editing_comment_id: None,
-                    visual_anchor: None,
-                    comment_line_range: None,
-                    commit_list: commits,
-                    commit_list_cursor: 0,
-                    commit_selection_range: None,
-                    should_quit: false,
-                    dirty: false,
-                    quit_warned: false,
-                    message: None,
-                    pending_confirm: None,
-                    supports_keyboard_enhancement: false,
-                    show_file_list: true,
-                    file_list_area: None,
-                    diff_area: None,
-                    expanded_dirs: HashSet::new(),
-                    expanded_gaps: HashSet::new(),
-                    expanded_content: HashMap::new(),
-                    line_annotations: Vec::new(),
-                })
+            // Set up inline commit selector for multi-commit reviews
+            if review_commits.len() > 1 {
+                app.range_diff_files = Some(app.diff_files.clone());
+                app.commit_list = review_commits.clone();
+                app.commit_list_cursor = 0;
+                app.commit_selection_range = Some((0, review_commits.len() - 1));
+                app.commit_list_scroll_offset = 0;
+                app.visible_commit_count = review_commits.len();
+                app.has_more_commit = false;
+                app.show_commit_selector = true;
+                app.commit_diff_cache.clear();
             }
-            Err(e) => Err(e),
+            app.review_commits = review_commits;
+
+            Ok(app)
+        } else {
+            let working_tree_diff = match vcs.get_working_tree_diff(highlighter) {
+                Ok(diff_files) => Some(diff_files),
+                Err(TuicrError::NoChanges) => None,
+                Err(e) => return Err(e),
+            };
+
+            let commits = vcs.get_recent_commits(0, VISIBLE_COMMIT_COUNT)?;
+            if working_tree_diff.is_none() && commits.is_empty() {
+                return Err(TuicrError::NoChanges);
+            }
+
+            let mut commit_list = commits.clone();
+            if working_tree_diff.is_some() {
+                commit_list.insert(0, Self::working_tree_commit_entry());
+            }
+
+            let session = Self::load_or_create_session(&vcs_info);
+            let mut app = Self::build(
+                vcs,
+                vcs_info,
+                theme,
+                output_to_stdout,
+                working_tree_diff.unwrap_or_default(),
+                session,
+                DiffSource::WorkingTree,
+                InputMode::CommitSelect,
+                commit_list,
+            )?;
+
+            app.has_more_commit = commits.len() >= VISIBLE_COMMIT_COUNT;
+            app.visible_commit_count = app.commit_list.len();
+            Ok(app)
         }
     }
 
-    fn load_or_create_session(vcs_info: &VcsInfo) -> ReviewSession {
-        match find_session_for_repo(&vcs_info.root_path) {
-            Ok(Some(path)) => match load_session(&path) {
-                Ok(s) => {
-                    // Delete stale session file if base commit doesn't match
-                    if s.base_commit != vcs_info.head_commit {
-                        let _ = std::fs::remove_file(&path);
-                        ReviewSession::new(vcs_info.root_path.clone(), vcs_info.head_commit.clone())
-                    } else {
-                        s
-                    }
-                }
-                Err(_) => {
-                    ReviewSession::new(vcs_info.root_path.clone(), vcs_info.head_commit.clone())
-                }
-            },
-            _ => ReviewSession::new(vcs_info.root_path.clone(), vcs_info.head_commit.clone()),
+    /// Shared constructor: all `App::new` paths converge here.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        vcs: Box<dyn VcsBackend>,
+        vcs_info: VcsInfo,
+        theme: Theme,
+        output_to_stdout: bool,
+        diff_files: Vec<DiffFile>,
+        mut session: ReviewSession,
+        diff_source: DiffSource,
+        input_mode: InputMode,
+        commit_list: Vec<CommitInfo>,
+    ) -> Result<Self> {
+        // Ensure all diff files are registered in the session
+        for file in &diff_files {
+            session.add_file(file.display_path().clone(), file.status);
         }
+
+        let has_more_commit = commit_list.len() >= VISIBLE_COMMIT_COUNT;
+        let visible_commit_count = if commit_list.is_empty() {
+            VISIBLE_COMMIT_COUNT
+        } else {
+            commit_list.len()
+        };
+
+        let mut app = Self {
+            theme,
+            vcs,
+            vcs_info,
+            session,
+            diff_files,
+            diff_source,
+            input_mode,
+            focused_panel: FocusedPanel::Diff,
+            diff_view_mode: DiffViewMode::Unified,
+            file_list_state: FileListState::default(),
+            diff_state: DiffState::default(),
+            help_state: HelpState::default(),
+            command_buffer: String::new(),
+            search_buffer: String::new(),
+            last_search_pattern: None,
+            comment_buffer: String::new(),
+            comment_cursor: 0,
+            comment_type: CommentType::Note,
+            comment_is_file_level: true,
+            comment_line: None,
+            editing_comment_id: None,
+            visual_anchor: None,
+            comment_line_range: None,
+            commit_list,
+            commit_list_cursor: 0,
+            commit_list_scroll_offset: 0,
+            commit_list_viewport_height: 0,
+            commit_selection_range: None,
+            visible_commit_count,
+            commit_page_size: COMMIT_PAGE_SIZE,
+            has_more_commit,
+            should_quit: false,
+            dirty: false,
+            quit_warned: false,
+            message: None,
+            pending_confirm: None,
+            supports_keyboard_enhancement: false,
+            show_file_list: true,
+            file_list_area: None,
+            diff_area: None,
+            expanded_dirs: HashSet::new(),
+            expanded_gaps: HashSet::new(),
+            expanded_content: HashMap::new(),
+            line_annotations: Vec::new(),
+            output_to_stdout,
+            pending_stdout_output: None,
+            comment_cursor_screen_pos: None,
+            update_info: None,
+            review_commits: Vec::new(),
+            show_commit_selector: false,
+            commit_diff_cache: HashMap::new(),
+            range_diff_files: None,
+            saved_inline_selection: None,
+        };
+        app.sort_files_by_directory(true);
+        app.expand_all_dirs();
+        app.rebuild_annotations();
+        Ok(app)
+    }
+
+    /// Load or create a session for a commit range (used by revisions and commit selection).
+    fn load_or_create_commit_range_session(
+        vcs_info: &VcsInfo,
+        commit_ids: &[String],
+    ) -> ReviewSession {
+        let newest_commit_id = commit_ids.last().unwrap().clone();
+        let loaded = load_latest_session_for_context(
+            &vcs_info.root_path,
+            vcs_info.branch_name.as_deref(),
+            &newest_commit_id,
+            SessionDiffSource::CommitRange,
+            Some(commit_ids),
+        )
+        .ok()
+        .and_then(|found| found.map(|(_path, session)| session));
+
+        let mut session = loaded.unwrap_or_else(|| {
+            let mut s = ReviewSession::new(
+                vcs_info.root_path.clone(),
+                newest_commit_id,
+                vcs_info.branch_name.clone(),
+                SessionDiffSource::CommitRange,
+            );
+            s.commit_range = Some(commit_ids.to_vec());
+            s
+        });
+
+        if session.commit_range.is_none() {
+            session.commit_range = Some(commit_ids.to_vec());
+            session.updated_at = chrono::Utc::now();
+        }
+        session
+    }
+
+    fn load_or_create_session(vcs_info: &VcsInfo) -> ReviewSession {
+        let new_session = || {
+            ReviewSession::new(
+                vcs_info.root_path.clone(),
+                vcs_info.head_commit.clone(),
+                vcs_info.branch_name.clone(),
+                SessionDiffSource::WorkingTree,
+            )
+        };
+
+        let Ok(found) = load_latest_session_for_context(
+            &vcs_info.root_path,
+            vcs_info.branch_name.as_deref(),
+            &vcs_info.head_commit,
+            SessionDiffSource::WorkingTree,
+            None,
+        ) else {
+            return new_session();
+        };
+
+        let Some((_path, mut session)) = found else {
+            return new_session();
+        };
+
+        let mut updated = false;
+        if session.branch_name.is_none() && vcs_info.branch_name.is_some() {
+            session.branch_name = vcs_info.branch_name.clone();
+            updated = true;
+        }
+
+        if vcs_info.branch_name.is_some() && session.base_commit != vcs_info.head_commit {
+            session.base_commit = vcs_info.head_commit.clone();
+            updated = true;
+        }
+
+        if updated {
+            session.updated_at = chrono::Utc::now();
+        }
+
+        session
+    }
+
+    fn working_tree_commit_entry() -> CommitInfo {
+        CommitInfo {
+            id: WORKING_TREE_SELECTION_ID.to_string(),
+            short_id: "WORKTREE".to_string(),
+            branch_name: None,
+            summary: "Uncommitted changes".to_string(),
+            author: String::new(),
+            time: Utc::now(),
+        }
+    }
+
+    fn is_working_tree_commit(commit: &CommitInfo) -> bool {
+        commit.id == WORKING_TREE_SELECTION_ID
+    }
+
+    fn has_working_tree_option(&self) -> bool {
+        self.commit_list
+            .first()
+            .map(Self::is_working_tree_commit)
+            .unwrap_or(false)
+    }
+
+    fn loaded_history_commit_count(&self) -> usize {
+        self.commit_list
+            .len()
+            .saturating_sub(usize::from(self.has_working_tree_option()))
+    }
+
+    fn load_working_tree_selection(&mut self) -> Result<()> {
+        let highlighter = self.theme.syntax_highlighter();
+        let diff_files = match self.vcs.get_working_tree_diff(highlighter) {
+            Ok(diff_files) => diff_files,
+            Err(TuicrError::NoChanges) => {
+                self.set_message("No uncommitted changes");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+
+        self.session = Self::load_or_create_session(&self.vcs_info);
+        for file in &diff_files {
+            let path = file.display_path().clone();
+            self.session.add_file(path, file.status);
+        }
+
+        self.diff_files = diff_files;
+        self.diff_source = DiffSource::WorkingTree;
+        self.input_mode = InputMode::Normal;
+        self.diff_state = DiffState::default();
+        self.file_list_state = FileListState::default();
+        self.clear_expanded_gaps();
+        self.sort_files_by_directory(true);
+        self.expand_all_dirs();
+        self.rebuild_annotations();
+
+        Ok(())
     }
 
     pub fn reload_diff_files(&mut self) -> Result<usize> {
@@ -404,7 +615,14 @@ impl App {
         };
 
         let highlighter = self.theme.syntax_highlighter();
-        let diff_files = self.vcs.get_working_tree_diff(highlighter)?;
+        let diff_files = match &self.diff_source {
+            DiffSource::WorkingTreeAndCommits(commit_ids) => {
+                let ids = commit_ids.clone();
+                self.vcs
+                    .get_working_tree_with_commits_diff(&ids, highlighter)?
+            }
+            _ => self.vcs.get_working_tree_diff(highlighter)?,
+        };
 
         for file in &diff_files {
             let path = file.display_path().clone();
@@ -558,36 +776,6 @@ impl App {
         self.diff_state.scroll_offset = self.diff_state.scroll_offset.saturating_sub(lines);
         self.ensure_cursor_visible();
         self.update_current_file_from_cursor();
-    }
-
-    pub fn viewport_scroll_down(&mut self, lines: usize) {
-        let max_scroll = self.max_scroll_offset();
-
-        // Move viewport down
-        self.diff_state.scroll_offset = (self.diff_state.scroll_offset + lines).min(max_scroll);
-
-        // Clamp cursor to stay within viewport bounds
-        // If cursor is now above the visible area, move it to the top visible line
-        if self.diff_state.cursor_line < self.diff_state.scroll_offset {
-            self.diff_state.cursor_line = self.diff_state.scroll_offset;
-        }
-    }
-
-    pub fn viewport_scroll_up(&mut self, lines: usize) {
-        // Move viewport up
-        self.diff_state.scroll_offset = self.diff_state.scroll_offset.saturating_sub(lines);
-
-        // Clamp cursor to stay within viewport bounds
-        // If cursor is now below the visible area, move it to the bottom visible line
-        let visible_lines = if self.diff_state.visible_line_count > 0 {
-            self.diff_state.visible_line_count
-        } else {
-            self.diff_state.viewport_height.max(1)
-        };
-        let max_visible_line = self.diff_state.scroll_offset + visible_lines - 1;
-        if self.diff_state.cursor_line > max_visible_line {
-            self.diff_state.cursor_line = max_visible_line;
-        }
     }
 
     pub fn scroll_left(&mut self, cols: usize) {
@@ -794,6 +982,26 @@ impl App {
                     Some("(no changes)".to_string())
                 }
             }
+            AnnotatedLine::SideBySideLine {
+                file_idx,
+                hunk_idx,
+                del_line_idx,
+                add_line_idx,
+                ..
+            } => {
+                let file = self.diff_files.get(*file_idx)?;
+                let hunk = file.hunks.get(*hunk_idx)?;
+
+                let del_content = del_line_idx
+                    .and_then(|idx| hunk.lines.get(idx))
+                    .map(|l| l.content.as_str())
+                    .unwrap_or("");
+                let add_content = add_line_idx
+                    .and_then(|idx| hunk.lines.get(idx))
+                    .map(|l| l.content.as_str())
+                    .unwrap_or("");
+                Some(format!("{} {}", del_content, add_content))
+            }
             AnnotatedLine::Spacing => None,
         }
     }
@@ -833,46 +1041,6 @@ impl App {
     pub fn file_list_up(&mut self, n: usize) {
         let new_idx = self.file_list_state.selected().saturating_sub(n);
         self.file_list_state.select(new_idx);
-    }
-
-    pub fn file_list_viewport_scroll_down(&mut self, lines: usize) {
-        let visible_items = self.build_visible_items();
-        let total = visible_items.len();
-        let viewport = self.file_list_state.viewport_height.max(1);
-        let selected = self.file_list_state.selected();
-
-        // Get current offset
-        let current_offset = self.file_list_state.list_state.offset();
-        let max_offset = total.saturating_sub(viewport);
-
-        // Move viewport down
-        let new_offset = (current_offset + lines).min(max_offset);
-        *self.file_list_state.list_state.offset_mut() = new_offset;
-
-        // Clamp cursor to stay within viewport bounds
-        // If cursor is now above the visible area, move it to the top visible line
-        if selected < new_offset {
-            self.file_list_state.select(new_offset);
-        }
-    }
-
-    pub fn file_list_viewport_scroll_up(&mut self, lines: usize) {
-        let viewport = self.file_list_state.viewport_height.max(1);
-        let selected = self.file_list_state.selected();
-
-        // Get current offset
-        let current_offset = self.file_list_state.list_state.offset();
-
-        // Move viewport up
-        let new_offset = current_offset.saturating_sub(lines);
-        *self.file_list_state.list_state.offset_mut() = new_offset;
-
-        // Clamp cursor to stay within viewport bounds
-        // If cursor is now below the visible area, move it to the bottom visible line
-        let max_visible = new_offset + viewport - 1;
-        if selected > max_visible {
-            self.file_list_state.select(max_visible);
-        }
     }
 
     pub fn jump_to_file(&mut self, idx: usize) {
@@ -1089,26 +1257,133 @@ impl App {
                 // Hunk header + diff lines
                 content_lines += 1; // Hunk header
 
-                for diff_line in &hunk.lines {
-                    content_lines += 1;
+                // Count diff lines based on view mode
+                match self.diff_view_mode {
+                    DiffViewMode::Unified => {
+                        for diff_line in &hunk.lines {
+                            content_lines += 1;
 
-                    if let Some(line_comments) = line_comments {
-                        if let Some(old_ln) = diff_line.old_lineno
-                            && let Some(comments) = line_comments.get(&old_ln)
-                        {
-                            for comment in comments {
-                                if comment.side == Some(LineSide::Old) {
-                                    comment_lines += Self::comment_display_lines(comment);
+                            if let Some(line_comments) = line_comments {
+                                if let Some(old_ln) = diff_line.old_lineno
+                                    && let Some(comments) = line_comments.get(&old_ln)
+                                {
+                                    for comment in comments {
+                                        if comment.side == Some(LineSide::Old) {
+                                            comment_lines += Self::comment_display_lines(comment);
+                                        }
+                                    }
+                                }
+
+                                if let Some(new_ln) = diff_line.new_lineno
+                                    && let Some(comments) = line_comments.get(&new_ln)
+                                {
+                                    for comment in comments {
+                                        if comment.side != Some(LineSide::Old) {
+                                            comment_lines += Self::comment_display_lines(comment);
+                                        }
+                                    }
                                 }
                             }
                         }
+                    }
+                    DiffViewMode::SideBySide => {
+                        use crate::model::LineOrigin;
+                        // Side-by-side mode: pair deletions with following additions
+                        let lines = &hunk.lines;
+                        let mut i = 0;
+                        while i < lines.len() {
+                            let diff_line = &lines[i];
 
-                        if let Some(new_ln) = diff_line.new_lineno
-                            && let Some(comments) = line_comments.get(&new_ln)
-                        {
-                            for comment in comments {
-                                if comment.side != Some(LineSide::Old) {
-                                    comment_lines += Self::comment_display_lines(comment);
+                            match diff_line.origin {
+                                LineOrigin::Context => {
+                                    content_lines += 1;
+
+                                    // Comments for context line
+                                    if let Some(line_comments) = line_comments
+                                        && let Some(new_ln) = diff_line.new_lineno
+                                        && let Some(comments) = line_comments.get(&new_ln)
+                                    {
+                                        for comment in comments {
+                                            if comment.side != Some(LineSide::Old) {
+                                                comment_lines +=
+                                                    Self::comment_display_lines(comment);
+                                            }
+                                        }
+                                    }
+                                    i += 1;
+                                }
+                                LineOrigin::Deletion => {
+                                    // Find consecutive deletions
+                                    let del_start = i;
+                                    let mut del_end = i + 1;
+                                    while del_end < lines.len()
+                                        && lines[del_end].origin == LineOrigin::Deletion
+                                    {
+                                        del_end += 1;
+                                    }
+
+                                    // Find consecutive additions following deletions
+                                    let add_start = del_end;
+                                    let mut add_end = add_start;
+                                    while add_end < lines.len()
+                                        && lines[add_end].origin == LineOrigin::Addition
+                                    {
+                                        add_end += 1;
+                                    }
+
+                                    let del_count = del_end - del_start;
+                                    let add_count = add_end - add_start;
+                                    // Paired lines use max of the two counts
+                                    content_lines += del_count.max(add_count);
+
+                                    // Count comments for all deletions and additions in this pair
+                                    if let Some(line_comments) = line_comments {
+                                        for line in &lines[del_start..del_end] {
+                                            if let Some(old_ln) = line.old_lineno
+                                                && let Some(comments) = line_comments.get(&old_ln)
+                                            {
+                                                for comment in comments {
+                                                    if comment.side == Some(LineSide::Old) {
+                                                        comment_lines +=
+                                                            Self::comment_display_lines(comment);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        for line in &lines[add_start..add_end] {
+                                            if let Some(new_ln) = line.new_lineno
+                                                && let Some(comments) = line_comments.get(&new_ln)
+                                            {
+                                                for comment in comments {
+                                                    if comment.side != Some(LineSide::Old) {
+                                                        comment_lines +=
+                                                            Self::comment_display_lines(comment);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    i = add_end;
+                                }
+                                LineOrigin::Addition => {
+                                    // Standalone addition (not following deletions)
+                                    content_lines += 1;
+
+                                    if let Some(line_comments) = line_comments
+                                        && let Some(new_ln) = diff_line.new_lineno
+                                        && let Some(comments) = line_comments.get(&new_ln)
+                                    {
+                                        for comment in comments {
+                                            if comment.side != Some(LineSide::Old) {
+                                                comment_lines +=
+                                                    Self::comment_display_lines(comment);
+                                            }
+                                        }
+                                    }
+
+                                    i += 1;
                                 }
                             }
                         }
@@ -1176,6 +1451,11 @@ impl App {
         let target = self.diff_state.cursor_line;
         match self.line_annotations.get(target) {
             Some(AnnotatedLine::DiffLine {
+                old_lineno,
+                new_lineno,
+                ..
+            })
+            | Some(AnnotatedLine::SideBySideLine {
                 old_lineno,
                 new_lineno,
                 ..
@@ -1574,15 +1854,35 @@ impl App {
     }
 
     pub fn enter_commit_select_mode(&mut self) -> Result<()> {
-        let commits = self.vcs.get_recent_commits(20)?;
-        if commits.is_empty() {
-            self.set_message("No commits found");
+        // Save inline selection state if we have review commits
+        if !self.review_commits.is_empty() {
+            self.saved_inline_selection = self.commit_selection_range;
+        }
+
+        let highlighter = self.theme.syntax_highlighter();
+        let has_uncommitted_changes = match self.vcs.get_working_tree_diff(highlighter) {
+            Ok(_) => true,
+            Err(TuicrError::NoChanges) => false,
+            Err(e) => return Err(e),
+        };
+
+        let commits = self.vcs.get_recent_commits(0, VISIBLE_COMMIT_COUNT)?;
+        if commits.is_empty() && !has_uncommitted_changes {
+            self.set_message("No commits or uncommitted changes found");
             return Ok(());
         }
 
+        // Check if there might be more commits
+        self.has_more_commit = commits.len() >= VISIBLE_COMMIT_COUNT;
         self.commit_list = commits;
+        if has_uncommitted_changes {
+            self.commit_list
+                .insert(0, Self::working_tree_commit_entry());
+        }
         self.commit_list_cursor = 0;
+        self.commit_list_scroll_offset = 0;
         self.commit_selection_range = None;
+        self.visible_commit_count = self.commit_list.len();
         self.input_mode = InputMode::CommitSelect;
         Ok(())
     }
@@ -1590,8 +1890,28 @@ impl App {
     pub fn exit_commit_select_mode(&mut self) -> Result<()> {
         self.input_mode = InputMode::Normal;
 
+        // If we have review commits, restore the inline selector state
+        if !self.review_commits.is_empty() {
+            self.commit_list = self.review_commits.clone();
+            self.commit_selection_range = self.saved_inline_selection;
+            self.commit_list_cursor = 0;
+            self.commit_list_scroll_offset = 0;
+            self.visible_commit_count = self.review_commits.len();
+            self.has_more_commit = false;
+            self.saved_inline_selection = None;
+
+            // Reload diff for the restored selection
+            if self.commit_selection_range.is_some() {
+                self.reload_inline_selection()?;
+            }
+            return Ok(());
+        }
+
         // If we were viewing commits, try to go back to working tree
-        if matches!(self.diff_source, DiffSource::CommitRange(_)) {
+        if matches!(
+            self.diff_source,
+            DiffSource::CommitRange(_) | DiffSource::WorkingTreeAndCommits(_)
+        ) {
             let highlighter = self.theme.syntax_highlighter();
             match self.vcs.get_working_tree_diff(highlighter) {
                 Ok(diff_files) => {
@@ -1626,6 +1946,7 @@ impl App {
             DiffViewMode::SideBySide => "side-by-side",
         };
         self.set_message(format!("Diff view mode: {mode_name}"));
+        self.rebuild_annotations();
     }
 
     pub fn toggle_file_list(&mut self) {
@@ -1638,18 +1959,87 @@ impl App {
         self.set_message(format!("File list: {status}"));
     }
 
+    /// Whether the inline commit selector panel should be displayed.
+    pub fn has_inline_commit_selector(&self) -> bool {
+        self.show_commit_selector
+            && self.review_commits.len() > 1
+            && !matches!(&self.diff_source, DiffSource::WorkingTree)
+    }
+
     // Commit selection methods
 
     pub fn commit_select_up(&mut self) {
         if self.commit_list_cursor > 0 {
             self.commit_list_cursor -= 1;
+            // Scroll up if cursor goes above visible area
+            if self.commit_list_cursor < self.commit_list_scroll_offset {
+                self.commit_list_scroll_offset = self.commit_list_cursor;
+            }
         }
     }
 
     pub fn commit_select_down(&mut self) {
-        if self.commit_list_cursor < self.commit_list.len().saturating_sub(1) {
+        let max_cursor = if self.can_show_more_commits() {
+            self.visible_commit_count
+        } else {
+            self.visible_commit_count.saturating_sub(1)
+        };
+
+        if self.commit_list_cursor < max_cursor {
             self.commit_list_cursor += 1;
+            // Scroll down if cursor goes below visible area
+            if self.commit_list_viewport_height > 0
+                && self.commit_list_cursor
+                    >= self.commit_list_scroll_offset + self.commit_list_viewport_height
+            {
+                self.commit_list_scroll_offset =
+                    self.commit_list_cursor - self.commit_list_viewport_height + 1;
+            }
         }
+    }
+
+    // Check if cursor is on the commit expand row
+    pub fn is_on_expand_row(&self) -> bool {
+        self.can_show_more_commits() && self.commit_list_cursor == self.visible_commit_count
+    }
+
+    pub fn can_show_more_commits(&self) -> bool {
+        self.visible_commit_count < self.commit_list.len() || self.has_more_commit
+    }
+
+    // Expand the commit list to show more commits
+    pub fn expand_commit(&mut self) -> Result<()> {
+        if self.visible_commit_count < self.commit_list.len() {
+            self.visible_commit_count =
+                (self.visible_commit_count + self.commit_page_size).min(self.commit_list.len());
+            return Ok(());
+        }
+
+        if !self.has_more_commit {
+            self.set_message("No more commits");
+            return Ok(());
+        }
+
+        let offset = self.loaded_history_commit_count();
+        let limit = self.commit_page_size;
+
+        let new_commits = self.vcs.get_recent_commits(offset, limit)?;
+
+        if new_commits.is_empty() {
+            self.has_more_commit = false;
+            self.set_message("No more commits");
+            return Ok(());
+        }
+
+        if new_commits.len() < limit {
+            self.has_more_commit = false;
+            self.set_message("No more commits");
+        }
+
+        self.commit_list.extend(new_commits);
+        self.visible_commit_count = self.commit_list.len();
+
+        Ok(())
     }
 
     pub fn toggle_commit_selection(&mut self) {
@@ -1698,22 +2088,109 @@ impl App {
         }
     }
 
+    /// Cycle inline commit selector to the next individual commit (`)` key).
+    /// all → last, i → i+1, last → all
+    pub fn cycle_commit_next(&mut self) {
+        if self.review_commits.is_empty() {
+            return;
+        }
+        let n = self.review_commits.len();
+        let all_selected = Some((0, n - 1));
+
+        if self.commit_selection_range == all_selected {
+            // all → last
+            self.commit_selection_range = Some((n - 1, n - 1));
+            self.commit_list_cursor = n - 1;
+        } else if let Some((i, j)) = self.commit_selection_range {
+            if i == j {
+                // Single commit selected
+                if i == n - 1 {
+                    // last → all
+                    self.commit_selection_range = all_selected;
+                } else {
+                    // i → i+1
+                    self.commit_selection_range = Some((i + 1, i + 1));
+                    self.commit_list_cursor = i + 1;
+                }
+            } else {
+                // Multi-commit subrange → select last of that range
+                self.commit_selection_range = Some((j, j));
+                self.commit_list_cursor = j;
+            }
+        } else {
+            // None selected → select all
+            self.commit_selection_range = all_selected;
+        }
+    }
+
+    /// Cycle inline commit selector to the previous individual commit (`(` key).
+    /// all → first, i → i-1, first → all
+    pub fn cycle_commit_prev(&mut self) {
+        if self.review_commits.is_empty() {
+            return;
+        }
+        let n = self.review_commits.len();
+        let all_selected = Some((0, n - 1));
+
+        if self.commit_selection_range == all_selected {
+            // all → first
+            self.commit_selection_range = Some((0, 0));
+            self.commit_list_cursor = 0;
+        } else if let Some((i, j)) = self.commit_selection_range {
+            if i == j {
+                // Single commit selected
+                if i == 0 {
+                    // first → all
+                    self.commit_selection_range = all_selected;
+                } else {
+                    // i → i-1
+                    self.commit_selection_range = Some((i - 1, i - 1));
+                    self.commit_list_cursor = i - 1;
+                }
+            } else {
+                // Multi-commit subrange → select first of that range
+                self.commit_selection_range = Some((i, i));
+                self.commit_list_cursor = i;
+            }
+        } else {
+            // None selected → select all
+            self.commit_selection_range = all_selected;
+        }
+    }
+
     pub fn confirm_commit_selection(&mut self) -> Result<()> {
         let Some((start, end)) = self.commit_selection_range else {
             self.set_message("Select at least one commit");
             return Ok(());
         };
 
-        // Collect selected commit IDs (in order from oldest to newest, i.e., end to start)
-        // commit_list[0] is newest (HEAD), commit_list[end] is oldest selected
-        let selected_ids: Vec<String> = (start..=end)
+        // Collect selected entries in order from oldest to newest (end..start).
+        let selected_commits: Vec<&CommitInfo> = (start..=end)
             .rev()
-            .filter_map(|i| self.commit_list.get(i).map(|c| c.id.clone()))
+            .filter_map(|i| self.commit_list.get(i))
             .collect();
 
-        if selected_ids.is_empty() {
+        if selected_commits.is_empty() {
             self.set_message("Select at least one commit");
             return Ok(());
+        }
+
+        let selected_working_tree = selected_commits
+            .iter()
+            .any(|c| Self::is_working_tree_commit(c));
+        let selected_ids: Vec<String> = selected_commits
+            .iter()
+            .filter(|c| !Self::is_working_tree_commit(c))
+            .map(|c| c.id.clone())
+            .collect();
+
+        if selected_working_tree && !selected_ids.is_empty() {
+            let all_selected: Vec<CommitInfo> = selected_commits.into_iter().cloned().collect();
+            return self.load_working_tree_and_commits_selection(selected_ids, all_selected);
+        }
+
+        if selected_working_tree {
+            return self.load_working_tree_selection();
         }
 
         // Get the diff for the selected commits
@@ -1727,8 +2204,33 @@ impl App {
 
         // Update session with the newest commit as base
         let newest_commit_id = selected_ids.last().unwrap().clone();
-        self.session =
-            ReviewSession::new(self.vcs_info.root_path.clone(), newest_commit_id.clone());
+        let loaded_session = load_latest_session_for_context(
+            &self.vcs_info.root_path,
+            self.vcs_info.branch_name.as_deref(),
+            &newest_commit_id,
+            SessionDiffSource::CommitRange,
+            Some(selected_ids.as_slice()),
+        )
+        .ok()
+        .and_then(|found| found.map(|(_path, session)| session));
+
+        let mut session = loaded_session.unwrap_or_else(|| {
+            let mut session = ReviewSession::new(
+                self.vcs_info.root_path.clone(),
+                newest_commit_id,
+                self.vcs_info.branch_name.clone(),
+                SessionDiffSource::CommitRange,
+            );
+            session.commit_range = Some(selected_ids.clone());
+            session
+        });
+
+        if session.commit_range.is_none() {
+            session.commit_range = Some(selected_ids.clone());
+            session.updated_at = chrono::Utc::now();
+        }
+
+        self.session = session;
 
         // Add files to session
         for file in &diff_files {
@@ -1745,10 +2247,206 @@ impl App {
         self.diff_state = DiffState::default();
         self.file_list_state = FileListState::default();
 
+        // Set up inline commit selector for multi-commit reviews (newest-first display order)
+        self.review_commits = selected_commits
+            .iter()
+            .rev()
+            .map(|c| (*c).clone())
+            .collect();
+        self.range_diff_files = Some(self.diff_files.clone());
+        self.commit_list = self.review_commits.clone();
+        self.commit_list_cursor = 0;
+        self.commit_selection_range = if self.review_commits.is_empty() {
+            None
+        } else {
+            Some((0, self.review_commits.len() - 1))
+        };
+        self.commit_list_scroll_offset = 0;
+        self.visible_commit_count = self.review_commits.len();
+        self.has_more_commit = false;
+        self.show_commit_selector = self.review_commits.len() > 1;
+        self.commit_diff_cache.clear();
+        self.saved_inline_selection = None;
+
         self.sort_files_by_directory(true);
         self.expand_all_dirs();
         self.rebuild_annotations();
 
+        Ok(())
+    }
+
+    /// Reload the diff for the currently selected inline commit subrange.
+    pub fn reload_inline_selection(&mut self) -> Result<()> {
+        let Some((start, end)) = self.commit_selection_range else {
+            self.set_message("Select at least one commit");
+            return Ok(());
+        };
+
+        // Check if all commits selected -> use cached range_diff_files
+        if start == 0
+            && end == self.review_commits.len() - 1
+            && let Some(ref files) = self.range_diff_files
+        {
+            self.diff_files = files.clone();
+            let wrap = self.diff_state.wrap_lines;
+            self.diff_state = DiffState::default();
+            self.diff_state.wrap_lines = wrap;
+            self.file_list_state = FileListState::default();
+            self.expanded_gaps.clear();
+            self.expanded_content.clear();
+            self.sort_files_by_directory(true);
+            self.expand_all_dirs();
+            self.rebuild_annotations();
+            return Ok(());
+        }
+
+        // Check cache for this subrange
+        if let Some(files) = self.commit_diff_cache.get(&(start, end)) {
+            self.diff_files = files.clone();
+            let wrap = self.diff_state.wrap_lines;
+            self.diff_state = DiffState::default();
+            self.diff_state.wrap_lines = wrap;
+            self.file_list_state = FileListState::default();
+            self.expanded_gaps.clear();
+            self.expanded_content.clear();
+            self.sort_files_by_directory(true);
+            self.expand_all_dirs();
+            self.rebuild_annotations();
+            return Ok(());
+        }
+
+        // Load diff for selected subrange
+        let has_worktree = (start..=end).any(|i| {
+            self.review_commits
+                .get(i)
+                .is_some_and(Self::is_working_tree_commit)
+        });
+        let selected_ids: Vec<String> = (start..=end)
+            .rev() // oldest to newest
+            .filter_map(|i| self.review_commits.get(i))
+            .filter(|c| !Self::is_working_tree_commit(c))
+            .map(|c| c.id.clone())
+            .collect();
+
+        let highlighter = self.theme.syntax_highlighter();
+        let diff_files = if has_worktree && !selected_ids.is_empty() {
+            match self
+                .vcs
+                .get_working_tree_with_commits_diff(&selected_ids, highlighter)
+            {
+                Ok(files) => files,
+                Err(TuicrError::NoChanges) => Vec::new(),
+                Err(e) => return Err(e),
+            }
+        } else if has_worktree {
+            match self.vcs.get_working_tree_diff(highlighter) {
+                Ok(files) => files,
+                Err(TuicrError::NoChanges) => Vec::new(),
+                Err(e) => return Err(e),
+            }
+        } else {
+            match self.vcs.get_commit_range_diff(&selected_ids, highlighter) {
+                Ok(files) => files,
+                Err(TuicrError::NoChanges) => Vec::new(),
+                Err(e) => return Err(e),
+            }
+        };
+        self.commit_diff_cache
+            .insert((start, end), diff_files.clone());
+        self.diff_files = diff_files;
+
+        // Reset navigation, rebuild file tree + annotations
+        let wrap = self.diff_state.wrap_lines;
+        self.diff_state = DiffState::default();
+        self.diff_state.wrap_lines = wrap;
+        self.file_list_state = FileListState::default();
+        self.expanded_gaps.clear();
+        self.expanded_content.clear();
+        self.sort_files_by_directory(true);
+        self.expand_all_dirs();
+        self.rebuild_annotations();
+
+        Ok(())
+    }
+
+    fn load_working_tree_and_commits_selection(
+        &mut self,
+        selected_ids: Vec<String>,
+        selected_commits: Vec<CommitInfo>,
+    ) -> Result<()> {
+        let highlighter = self.theme.syntax_highlighter();
+        let diff_files = match self
+            .vcs
+            .get_working_tree_with_commits_diff(&selected_ids, highlighter)
+        {
+            Ok(diff_files) => diff_files,
+            Err(TuicrError::NoChanges) => {
+                self.set_message("No changes in selected commits + working tree");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+
+        let newest_commit_id = selected_ids.last().unwrap().clone();
+        let loaded_session = load_latest_session_for_context(
+            &self.vcs_info.root_path,
+            self.vcs_info.branch_name.as_deref(),
+            &newest_commit_id,
+            SessionDiffSource::WorkingTreeAndCommits,
+            Some(selected_ids.as_slice()),
+        )
+        .ok()
+        .and_then(|found| found.map(|(_path, session)| session));
+
+        let mut session = loaded_session.unwrap_or_else(|| {
+            let mut session = ReviewSession::new(
+                self.vcs_info.root_path.clone(),
+                newest_commit_id,
+                self.vcs_info.branch_name.clone(),
+                SessionDiffSource::WorkingTreeAndCommits,
+            );
+            session.commit_range = Some(selected_ids.clone());
+            session
+        });
+
+        if session.commit_range.is_none() {
+            session.commit_range = Some(selected_ids.clone());
+            session.updated_at = chrono::Utc::now();
+        }
+
+        self.session = session;
+
+        for file in &diff_files {
+            let path = file.display_path().clone();
+            self.session.add_file(path, file.status);
+        }
+
+        self.diff_files = diff_files;
+        self.diff_source = DiffSource::WorkingTreeAndCommits(selected_ids);
+        self.input_mode = InputMode::Normal;
+        self.diff_state = DiffState::default();
+        self.file_list_state = FileListState::default();
+
+        // Set up inline commit selector (newest-first display order)
+        self.review_commits = selected_commits.into_iter().rev().collect();
+        self.range_diff_files = Some(self.diff_files.clone());
+        self.commit_list = self.review_commits.clone();
+        self.commit_list_cursor = 0;
+        self.commit_selection_range = if self.review_commits.is_empty() {
+            None
+        } else {
+            Some((0, self.review_commits.len() - 1))
+        };
+        self.commit_list_scroll_offset = 0;
+        self.visible_commit_count = self.review_commits.len();
+        self.has_more_commit = false;
+        self.show_commit_selector = self.review_commits.len() > 1;
+        self.commit_diff_cache.clear();
+        self.saved_inline_selection = None;
+
+        self.sort_files_by_directory(true);
+        self.expand_all_dirs();
+        self.rebuild_annotations();
         Ok(())
     }
 
@@ -1899,6 +2597,7 @@ impl App {
     /// - Diff files change (load/reload)
     /// - Expansion state changes (expand/collapse gap)
     /// - Comments are added/removed
+    /// - Diff view mode changes
     pub fn rebuild_annotations(&mut self) {
         self.line_annotations.clear();
 
@@ -1977,52 +2676,25 @@ impl App {
                     self.line_annotations
                         .push(AnnotatedLine::HunkHeader { file_idx, hunk_idx });
 
-                    // Diff lines
-                    for (line_idx, diff_line) in hunk.lines.iter().enumerate() {
-                        self.line_annotations.push(AnnotatedLine::DiffLine {
-                            file_idx,
-                            hunk_idx,
-                            line_idx,
-                            old_lineno: diff_line.old_lineno,
-                            new_lineno: diff_line.new_lineno,
-                        });
-
-                        // Line comments on old side (deleted lines)
-                        if let Some(old_ln) = diff_line.old_lineno
-                            && let Some(comments) = line_comments.get(&old_ln)
-                        {
-                            for (idx, comment) in comments.iter().enumerate() {
-                                if comment.side == Some(LineSide::Old) {
-                                    let comment_lines = Self::comment_display_lines(comment);
-                                    for _ in 0..comment_lines {
-                                        self.line_annotations.push(AnnotatedLine::LineComment {
-                                            file_idx,
-                                            line: old_ln,
-                                            side: LineSide::Old,
-                                            comment_idx: idx,
-                                        });
-                                    }
-                                }
-                            }
+                    // Diff lines - handle differently based on view mode
+                    match self.diff_view_mode {
+                        DiffViewMode::Unified => {
+                            Self::build_unified_diff_annotations(
+                                &mut self.line_annotations,
+                                file_idx,
+                                hunk_idx,
+                                &hunk.lines,
+                                &line_comments,
+                            );
                         }
-
-                        // Line comments on new side (added/context lines)
-                        if let Some(new_ln) = diff_line.new_lineno
-                            && let Some(comments) = line_comments.get(&new_ln)
-                        {
-                            for (idx, comment) in comments.iter().enumerate() {
-                                if comment.side != Some(LineSide::Old) {
-                                    let comment_lines = Self::comment_display_lines(comment);
-                                    for _ in 0..comment_lines {
-                                        self.line_annotations.push(AnnotatedLine::LineComment {
-                                            file_idx,
-                                            line: new_ln,
-                                            side: LineSide::New,
-                                            comment_idx: idx,
-                                        });
-                                    }
-                                }
-                            }
+                        DiffViewMode::SideBySide => {
+                            Self::build_side_by_side_annotations(
+                                &mut self.line_annotations,
+                                file_idx,
+                                hunk_idx,
+                                &hunk.lines,
+                                &line_comments,
+                            );
                         }
                     }
                 }
@@ -2030,6 +2702,201 @@ impl App {
 
             // Spacing line
             self.line_annotations.push(AnnotatedLine::Spacing);
+        }
+    }
+
+    fn push_comments(
+        annotations: &mut Vec<AnnotatedLine>,
+        file_idx: usize,
+        line_no: Option<u32>,
+        line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
+        side: LineSide,
+    ) {
+        let Some(ln) = line_no else {
+            return;
+        };
+
+        let Some(comments) = line_comments.get(&ln) else {
+            return;
+        };
+
+        for (idx, comment) in comments.iter().enumerate() {
+            let matches_side =
+                comment.side == Some(side) || (side == LineSide::New && comment.side.is_none());
+
+            if !matches_side {
+                continue;
+            }
+
+            let comment_lines = Self::comment_display_lines(comment);
+            for _ in 0..comment_lines {
+                annotations.push(AnnotatedLine::LineComment {
+                    file_idx,
+                    line: ln,
+                    comment_idx: idx,
+                    side,
+                });
+            }
+        }
+    }
+
+    /// Build annotations for unified diff mode (one annotation per diff line)
+    fn build_unified_diff_annotations(
+        annotations: &mut Vec<AnnotatedLine>,
+        file_idx: usize,
+        hunk_idx: usize,
+        lines: &[crate::model::DiffLine],
+        line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
+    ) {
+        for (line_idx, diff_line) in lines.iter().enumerate() {
+            annotations.push(AnnotatedLine::DiffLine {
+                file_idx,
+                hunk_idx,
+                line_idx,
+                old_lineno: diff_line.old_lineno,
+                new_lineno: diff_line.new_lineno,
+            });
+
+            // Line comments on old side (delete lines)
+            if let Some(old_ln) = diff_line.old_lineno {
+                Self::push_comments(
+                    annotations,
+                    file_idx,
+                    Some(old_ln),
+                    line_comments,
+                    LineSide::Old,
+                );
+            }
+
+            // Line comments on new side (added/context lines)
+            if let Some(new_ln) = diff_line.new_lineno {
+                Self::push_comments(
+                    annotations,
+                    file_idx,
+                    Some(new_ln),
+                    line_comments,
+                    LineSide::New,
+                );
+            }
+        }
+    }
+
+    /// Build annotations for side-by-side diff mode, pairing deletions and additions into aligned rows.
+    fn build_side_by_side_annotations(
+        annotations: &mut Vec<AnnotatedLine>,
+        file_idx: usize,
+        hunk_idx: usize,
+        lines: &[crate::model::DiffLine],
+        line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
+    ) {
+        let mut i = 0;
+        while i < lines.len() {
+            let diff_line = &lines[i];
+
+            match diff_line.origin {
+                LineOrigin::Context => {
+                    annotations.push(AnnotatedLine::SideBySideLine {
+                        file_idx,
+                        hunk_idx,
+                        del_line_idx: Some(i),
+                        add_line_idx: Some(i),
+                        old_lineno: diff_line.old_lineno,
+                        new_lineno: diff_line.new_lineno,
+                    });
+
+                    Self::push_comments(
+                        annotations,
+                        file_idx,
+                        diff_line.new_lineno,
+                        line_comments,
+                        LineSide::New,
+                    );
+
+                    i += 1
+                }
+
+                LineOrigin::Deletion => {
+                    // Find consecutive deletions
+                    let del_start = i;
+                    let mut del_end = i + 1;
+                    while del_end < lines.len() && lines[del_end].origin == LineOrigin::Deletion {
+                        del_end += 1;
+                    }
+
+                    // Find consecutive additions following deletions
+                    let add_start = del_end;
+                    let mut add_end = add_start;
+                    while add_end < lines.len() && lines[add_end].origin == LineOrigin::Addition {
+                        add_end += 1;
+                    }
+
+                    let del_count = del_end - del_start;
+                    let add_count = add_end - add_start;
+                    let max_lines = del_count.max(add_count);
+
+                    for offset in 0..max_lines {
+                        let del_idx = if offset < del_count {
+                            Some(del_start + offset)
+                        } else {
+                            None
+                        };
+                        let add_idx = if offset < add_count {
+                            Some(add_start + offset)
+                        } else {
+                            None
+                        };
+
+                        let old_lineno = del_idx.and_then(|idx| lines[idx].old_lineno);
+                        let new_lineno = add_idx.and_then(|idx| lines[idx].new_lineno);
+
+                        annotations.push(AnnotatedLine::SideBySideLine {
+                            file_idx,
+                            hunk_idx,
+                            del_line_idx: del_idx,
+                            add_line_idx: add_idx,
+                            old_lineno,
+                            new_lineno,
+                        });
+
+                        Self::push_comments(
+                            annotations,
+                            file_idx,
+                            old_lineno,
+                            line_comments,
+                            LineSide::Old,
+                        );
+                        Self::push_comments(
+                            annotations,
+                            file_idx,
+                            new_lineno,
+                            line_comments,
+                            LineSide::New,
+                        );
+                    }
+
+                    i = add_end;
+                }
+                LineOrigin::Addition => {
+                    annotations.push(AnnotatedLine::SideBySideLine {
+                        file_idx,
+                        hunk_idx,
+                        del_line_idx: None,
+                        add_line_idx: Some(i),
+                        old_lineno: None,
+                        new_lineno: diff_line.new_lineno,
+                    });
+
+                    Self::push_comments(
+                        annotations,
+                        file_idx,
+                        diff_line.new_lineno,
+                        line_comments,
+                        LineSide::New,
+                    );
+
+                    i += 1;
+                }
+            }
         }
     }
 
@@ -2338,7 +3205,6 @@ mod scroll_tests {
 
     /// Test the max_scroll_offset calculation logic directly using DiffState
     /// This tests the core algorithm without needing full App setup
-
     fn calc_max_scroll(total_lines: usize, viewport_height: usize, wrap_lines: bool) -> usize {
         let viewport = viewport_height.max(1);
         if wrap_lines {

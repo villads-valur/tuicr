@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
@@ -13,9 +13,9 @@ use crate::ui::styles;
 pub fn build_message_span(message: Option<&Message>, theme: &Theme) -> (Span<'static>, usize) {
     if let Some(msg) = message {
         let (fg, bg) = match msg.message_type {
-            MessageType::Info => (Color::Black, Color::Cyan),
-            MessageType::Warning => (Color::Black, theme.pending),
-            MessageType::Error => (Color::White, theme.comment_issue),
+            MessageType::Info => (theme.message_info_fg, theme.message_info_bg),
+            MessageType::Warning => (theme.message_warning_fg, theme.message_warning_bg),
+            MessageType::Error => (theme.message_error_fg, theme.message_error_bg),
         };
         let content = format!(" {} ", msg.content);
         let width = content.len();
@@ -63,8 +63,20 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             if commits.len() == 1 {
                 format!("[commit {}] ", &commits[0][..7.min(commits[0].len())])
             } else {
-                format!("[{} commits] ", commits.len())
+                match app.commit_selection_range {
+                    Some((start, end)) if end - start + 1 < app.review_commits.len() => {
+                        format!(
+                            "[{}/{} commits] ",
+                            end - start + 1,
+                            app.review_commits.len()
+                        )
+                    }
+                    _ => format!("[{} commits] ", commits.len()),
+                }
             }
+        }
+        DiffSource::WorkingTreeAndCommits(commits) => {
+            format!("[worktree + {} commits] ", commits.len())
         }
     };
 
@@ -82,7 +94,52 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         },
     );
 
-    let line = Line::from(vec![title_span, vcs_span, source_span, progress_span]);
+    let (update_span, update_width) = if let Some(ref info) = app.update_info {
+        if info.update_available {
+            let text = format!(" v{} available ", info.latest_version);
+            let width = text.len();
+            (
+                Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.update_badge_fg)
+                        .bg(theme.update_badge_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                width,
+            )
+        } else if info.is_ahead {
+            let text = format!(" unreleased v{} ", info.current_version);
+            let width = text.len();
+            (
+                Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.update_badge_fg)
+                        .bg(theme.update_badge_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                width,
+            )
+        } else {
+            (Span::raw(""), 0)
+        }
+    } else {
+        (Span::raw(""), 0)
+    };
+
+    let left_spans = vec![title_span, vcs_span, source_span, progress_span];
+    let left_width: usize = left_spans.iter().map(|s| s.content.len()).sum();
+    let total_width = area.width as usize;
+    let padding_width = total_width.saturating_sub(left_width + update_width);
+
+    let mut spans = left_spans;
+    spans.push(Span::raw(" ".repeat(padding_width)));
+    if update_width > 0 {
+        spans.push(update_span);
+    }
+
+    let line = Line::from(spans);
 
     let header = Paragraph::new(line)
         .style(styles::status_bar_style(theme))
@@ -172,4 +229,49 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         .block(Block::default());
 
     frame.render_widget(status, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_message(message_type: MessageType) -> Message {
+        Message {
+            content: "hello".to_string(),
+            message_type,
+        }
+    }
+
+    #[test]
+    fn should_style_info_message_using_theme_fields() {
+        let theme = Theme::dark();
+        let (span, width) = build_message_span(Some(&test_message(MessageType::Info)), &theme);
+        assert_eq!(span.style.fg, Some(theme.message_info_fg));
+        assert_eq!(span.style.bg, Some(theme.message_info_bg));
+        assert_eq!(width, " hello ".len());
+    }
+
+    #[test]
+    fn should_return_empty_span_when_message_is_none() {
+        let theme = Theme::dark();
+        let (span, width) = build_message_span(None, &theme);
+        assert_eq!(span.content.as_ref(), "");
+        assert_eq!(width, 0);
+    }
+
+    #[test]
+    fn should_style_warning_message_using_theme_fields() {
+        let theme = Theme::dark();
+        let (span, _) = build_message_span(Some(&test_message(MessageType::Warning)), &theme);
+        assert_eq!(span.style.fg, Some(theme.message_warning_fg));
+        assert_eq!(span.style.bg, Some(theme.message_warning_bg));
+    }
+
+    #[test]
+    fn should_style_error_message_using_theme_fields() {
+        let theme = Theme::dark();
+        let (span, _) = build_message_span(Some(&test_message(MessageType::Error)), &theme);
+        assert_eq!(span.style.fg, Some(theme.message_error_fg));
+        assert_eq!(span.style.bg, Some(theme.message_error_bg));
+    }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -119,14 +120,48 @@ impl VcsBackend for HgBackend {
         Ok(result)
     }
 
-    fn get_recent_commits(&self, count: usize) -> Result<Vec<CommitInfo>> {
+    fn resolve_revisions(&self, revisions: &str) -> Result<Vec<String>> {
+        // Use hg log to resolve the revset to commit hashes.
+        // hg log outputs newest first; we reverse so oldest is first.
+        let output = run_hg_command(
+            &self.info.root_path,
+            &["log", "-r", revisions, "--template", "{node}\\n"],
+        )?;
+
+        let mut commit_ids: Vec<String> = output
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+
+        if commit_ids.is_empty() {
+            return Err(TuicrError::NoChanges);
+        }
+
+        // hg log outputs newest first; reverse so oldest is first
+        commit_ids.reverse();
+        Ok(commit_ids)
+    }
+
+    fn get_recent_commits(&self, offset: usize, limit: usize) -> Result<Vec<CommitInfo>> {
         // Use hg log with a template to get structured output
         // Template fields separated by \x00, records separated by \x01
+        //
+        // hg log doesn't have a --skip option, so we fetch offset+limit commits
+        // and skip the first `offset` in Rust code
+        let fetch_count = offset + limit;
         let template =
             "{node}\\x00{node|short}\\x00{desc|firstline}\\x00{author|user}\\x00{date|hgdate}\\x01";
         let output = run_hg_command(
             &self.info.root_path,
-            &["log", "-l", &count.to_string(), "--template", template],
+            &[
+                "log",
+                "-l",
+                &fetch_count.to_string(),
+                "--template",
+                template,
+            ],
         )?;
 
         let mut commits = Vec::new();
@@ -157,13 +192,14 @@ impl VcsBackend for HgBackend {
             commits.push(CommitInfo {
                 id,
                 short_id,
+                branch_name: None,
                 summary,
                 author,
                 time,
             });
         }
 
-        Ok(commits)
+        Ok(commits.into_iter().skip(offset).collect())
     }
 
     fn get_commit_range_diff(
@@ -218,6 +254,110 @@ impl VcsBackend for HgBackend {
             &self.info.root_path,
             &["diff", "-r", &from_rev, "-r", newest_short],
         )?;
+
+        if diff_output.trim().is_empty() {
+            return Err(TuicrError::NoChanges);
+        }
+
+        diff_parser::parse_unified_diff(&diff_output, DiffFormat::Hg, highlighter)
+    }
+
+    fn get_commits_info(&self, ids: &[String]) -> Result<Vec<CommitInfo>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Use hg log with a revset matching the given IDs
+        let revset = ids
+            .iter()
+            .map(|id| {
+                if id.len() > 12 {
+                    &id[..12]
+                } else {
+                    id.as_str()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let template =
+            "{node}\\x00{node|short}\\x00{desc|firstline}\\x00{author|user}\\x00{date|hgdate}\\x01";
+        let output = run_hg_command(
+            &self.info.root_path,
+            &["log", "-r", &revset, "--template", template],
+        )?;
+
+        let mut by_id: HashMap<String, CommitInfo> = HashMap::new();
+        for record in output.split('\x01') {
+            let record = record.trim();
+            if record.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = record.split('\x00').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+            let id = parts[0].to_string();
+            let short_id = parts[1].to_string();
+            let summary = parts[2].to_string();
+            let author = parts[3].to_string();
+            let time = parts[4]
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<i64>().ok())
+                .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
+                .unwrap_or_else(Utc::now);
+            by_id.insert(
+                id.clone(),
+                CommitInfo {
+                    id,
+                    short_id,
+                    branch_name: None,
+                    summary,
+                    author,
+                    time,
+                },
+            );
+        }
+
+        // Return in input order
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
+
+    fn get_working_tree_with_commits_diff(
+        &self,
+        commit_ids: &[String],
+        highlighter: &SyntaxHighlighter,
+    ) -> Result<Vec<DiffFile>> {
+        if commit_ids.is_empty() {
+            return Err(TuicrError::NoChanges);
+        }
+
+        // commit_ids are ordered from oldest to newest
+        let oldest = &commit_ids[0];
+        let oldest_short = if oldest.len() > 12 {
+            &oldest[..12]
+        } else {
+            oldest.as_str()
+        };
+
+        // Get the parent of the oldest commit
+        let parent_output = run_hg_command(
+            &self.info.root_path,
+            &[
+                "log",
+                "-r",
+                &format!("parents({})", oldest_short),
+                "--template",
+                "{node|short}",
+            ],
+        );
+
+        let from_rev = match parent_output {
+            Ok(parent) if !parent.trim().is_empty() => parent.trim().to_string(),
+            _ => "null".to_string(),
+        };
+
+        // Diff from parent of oldest to working directory (omit --to)
+        let diff_output = run_hg_command(&self.info.root_path, &["diff", "-r", &from_rev])?;
 
         if diff_output.trim().is_empty() {
             return Err(TuicrError::NoChanges);
@@ -454,7 +594,7 @@ mod tests {
             HgBackend::from_path(temp.path().to_path_buf()).expect("Failed to create hg backend");
 
         let commits = backend
-            .get_recent_commits(5)
+            .get_recent_commits(0, 5)
             .expect("Failed to get commits");
 
         assert_eq!(commits.len(), 3);
@@ -482,7 +622,7 @@ mod tests {
             HgBackend::from_path(temp.path().to_path_buf()).expect("Failed to create hg backend");
 
         let commits = backend
-            .get_recent_commits(5)
+            .get_recent_commits(0, 5)
             .expect("Failed to get commits");
         assert_eq!(commits.len(), 3);
 

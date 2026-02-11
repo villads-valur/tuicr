@@ -38,6 +38,9 @@ pub struct VcsInfo {
 pub struct CommitInfo {
     pub id: String,
     pub short_id: String,
+    /// Optional branch label for this commit in commit selection UI.
+    /// For Git this is populated for commits that are branch tips.
+    pub branch_name: Option<String>,
     pub summary: String,
     pub author: String,
     pub time: DateTime<Utc>,
@@ -63,8 +66,16 @@ pub trait VcsBackend: Send {
 
     /// Get recent commits for commit selection UI.
     /// Returns empty vec if not supported (default).
-    fn get_recent_commits(&self, _count: usize) -> Result<Vec<CommitInfo>> {
+    fn get_recent_commits(&self, _offset: usize, _limit: usize) -> Result<Vec<CommitInfo>> {
         Ok(Vec::new())
+    }
+
+    /// Resolve a revisions expression to a list of commit IDs (oldest first).
+    /// Returns error if not supported (default).
+    fn resolve_revisions(&self, _revisions: &str) -> Result<Vec<String>> {
+        Err(crate::error::TuicrError::UnsupportedOperation(
+            "Revset resolution not supported for this VCS".into(),
+        ))
     }
 
     /// Get diff for a commit range.
@@ -76,6 +87,25 @@ pub trait VcsBackend: Send {
     ) -> Result<Vec<DiffFile>> {
         Err(crate::error::TuicrError::UnsupportedOperation(
             "Commit range diff not supported for this VCS".into(),
+        ))
+    }
+
+    /// Get commit info for specific commit IDs (for inline commit selector).
+    /// Returns CommitInfo for each ID, in the same order as the input.
+    fn get_commits_info(&self, _ids: &[String]) -> Result<Vec<CommitInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Get a combined diff from the parent of the oldest commit through to the working tree.
+    /// This shows both committed and uncommitted changes in a single diff.
+    /// Returns error if not supported (default).
+    fn get_working_tree_with_commits_diff(
+        &self,
+        _commit_ids: &[String],
+        _highlighter: &SyntaxHighlighter,
+    ) -> Result<Vec<DiffFile>> {
+        Err(crate::error::TuicrError::UnsupportedOperation(
+            "Working tree + commits diff not supported for this VCS".into(),
         ))
     }
 }
@@ -141,6 +171,7 @@ mod tests {
         let commit = CommitInfo {
             id: "abc123def456".to_string(),
             short_id: "abc123d".to_string(),
+            branch_name: Some("main".to_string()),
             summary: "Fix bug".to_string(),
             author: "Test User".to_string(),
             time: Utc::now(),
@@ -149,6 +180,7 @@ mod tests {
         let cloned = commit.clone();
         assert_eq!(cloned.id, "abc123def456");
         assert_eq!(cloned.short_id, "abc123d");
+        assert_eq!(cloned.branch_name, Some("main".to_string()));
         assert_eq!(cloned.summary, "Fix bug");
         assert_eq!(cloned.author, "Test User");
     }

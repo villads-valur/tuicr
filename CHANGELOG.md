@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-02-10
+
+### Bug Fixes
+
+- **diff:** Expand collapsed lines in side-by-side mode (#156)
+- **config:** Ignore unknown keys while preserving known settings (#166)
+
+### Features
+
+- **syntax:** Add syntax highlighting for diffs (#154)
+- **syntax:** Replace syntect defaults with two-face for expanded syntax highlighting (#155)
+- Add inline commit selector for multi-commit reviews (#160)
+- Allow selecting both worktree and commits in the selector (#161)
+- Add configuration file support and catppuccin themes (#162)
+## [0.6.0] - 2026-01-30
+
+### Bug Fixes
+
+- **ui:** Render comment input inline instead of as overlay (#137)
+- **jj:** Show closest bookmark instead of 'detached' in UI (#144)
+- **input:** Handle multi-byte UTF-8 characters in comment input (#132) (#147)
+
+### Documentation
+
+- **ui:** Update help and docs for search, commands, and stdout export (#148)
+
+### Features
+
+- **cli:** Add --stdout flag to output export to stdout (#142)
+- **skill:** Add Claude Code skill for interactive review (#143)
+- **app:** Support expandable commit list and adjust default commit loading (#138)
+- **update:** Check crates.io for new releases and surface update status in UI (#150)
+## [0.5.0] - 2026-01-23
+
+### Bug Fixes
+
+- Use absolute path for git repository discovery in worktrees (#123)
+- Parse paths from rename/copy metadata and binary file lines (#124)
+- Correct scroll behavior when line wrapping is enabled (#130)
+- **ui:** Status bar not appearing on commit panel (#121)
+- **clipboard:** Prefer OSC 52 in tmux/SSH sessions (#135)
+
+### Features
+
+- Add line range comment support with visual selection mode (#115)
+- Add manual commit selection mode (#91)
+- Add vim-style warning on exit with unsaved changes (#122)
+
+### Ci
+
+- Use cargo-binstall for faster jj installation (#126)
 ## [0.4.0] - 2026-01-17
 
 ### Bug Fixes

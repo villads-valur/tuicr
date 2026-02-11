@@ -17,13 +17,26 @@ type CommentEntry<'a> = (
     &'a str,
 );
 
-pub fn export_to_clipboard(session: &ReviewSession, diff_source: &DiffSource) -> Result<String> {
-    // Check if there are any comments to export
+/// Generate markdown content from the review session.
+/// Returns the markdown string or an error if there are no comments.
+pub fn generate_export_content(
+    session: &ReviewSession,
+    diff_source: &DiffSource,
+) -> Result<String> {
     if !session.has_comments() {
         return Err(TuicrError::NoComments);
     }
+    Ok(generate_markdown(session, diff_source))
+}
 
-    let content = generate_markdown(session, diff_source);
+pub fn export_to_clipboard(session: &ReviewSession, diff_source: &DiffSource) -> Result<String> {
+    let content = generate_export_content(session, diff_source)?;
+
+    // Prefer OSC 52 in tmux/SSH where arboard may silently fail
+    if should_prefer_osc52() {
+        copy_osc52(&content)?;
+        return Ok("Review copied to clipboard (via terminal)".to_string());
+    }
 
     // Try arboard (system clipboard) first, fall back to OSC 52 for SSH/remote sessions
     match Clipboard::new().and_then(|mut cb| cb.set_text(&content)) {
@@ -36,11 +49,56 @@ pub fn export_to_clipboard(session: &ReviewSession, diff_source: &DiffSource) ->
     }
 }
 
+/// Returns true if we should prefer OSC 52 over the system clipboard.
+///
+/// In tmux or SSH sessions, arboard may "succeed" but copy to an inaccessible
+/// X11 clipboard, so we use OSC 52 which works reliably in these environments.
+fn should_prefer_osc52() -> bool {
+    std::env::var("TMUX").is_ok() || std::env::var("SSH_TTY").is_ok()
+}
+
 /// Copy text to clipboard using OSC 52 escape sequence.
-/// This works over SSH as the escape sequence is interpreted by the local terminal.
+/// In tmux, raw OSC 52 is intercepted and may not reach the outer terminal.
+/// We use `tmux load-buffer -w` which tells tmux to handle the clipboard copy itself.
 fn copy_osc52(text: &str) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
-    write_osc52(&mut stdout, text)
+    if std::env::var("TMUX").is_ok() {
+        copy_via_tmux(text)
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        write_osc52(&mut stdout, text)
+    }
+}
+
+/// Copy text to the system clipboard via `tmux load-buffer -w -`.
+/// The `-w` flag tells tmux to also forward to the outer terminal's clipboard via OSC 52.
+fn copy_via_tmux(text: &str) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("tmux")
+        .args(["load-buffer", "-w", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| TuicrError::Clipboard(format!("Failed to run tmux: {e}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| TuicrError::Clipboard(format!("Failed to write to tmux: {e}")))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| TuicrError::Clipboard(format!("tmux load-buffer failed: {e}")))?;
+
+    if !status.success() {
+        return Err(TuicrError::Clipboard(
+            "tmux load-buffer exited with error".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Write OSC 52 escape sequence to the given writer.
@@ -79,6 +137,15 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
                 let short_ids: Vec<&str> = commits.iter().map(|c| &c[..7.min(c.len())]).collect();
                 let _ = writeln!(md, "Reviewing commits: {}", short_ids.join(", "));
             }
+            let _ = writeln!(md);
+        }
+        DiffSource::WorkingTreeAndCommits(commits) => {
+            let short_ids: Vec<&str> = commits.iter().map(|c| &c[..7.min(c.len())]).collect();
+            let _ = writeln!(
+                md,
+                "Reviewing working tree + commits: {}",
+                short_ids.join(", ")
+            );
             let _ = writeln!(md);
         }
     }
@@ -173,12 +240,16 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Comment, CommentType, FileStatus, LineRange, LineSide};
+    use crate::model::{Comment, CommentType, FileStatus, LineRange, LineSide, SessionDiffSource};
     use std::path::PathBuf;
 
     fn create_test_session() -> ReviewSession {
-        let mut session =
-            ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
 
         // Add a file comment
@@ -240,11 +311,52 @@ mod tests {
     #[test]
     fn should_fail_export_when_no_comments() {
         // given
-        let session = ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         let diff_source = DiffSource::WorkingTree;
 
         // when
         let result = export_to_clipboard(&session, &diff_source);
+
+        // then
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TuicrError::NoComments));
+    }
+
+    #[test]
+    fn should_generate_export_content_with_comments() {
+        // given
+        let session = create_test_session();
+        let diff_source = DiffSource::WorkingTree;
+
+        // when
+        let result = generate_export_content(&session, &diff_source);
+
+        // then
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert!(content.contains("I reviewed your code"));
+        assert!(content.contains("[SUGGESTION]"));
+        assert!(content.contains("[ISSUE]"));
+    }
+
+    #[test]
+    fn should_fail_generate_export_content_when_no_comments() {
+        // given
+        let session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
+        let diff_source = DiffSource::WorkingTree;
+
+        // when
+        let result = generate_export_content(&session, &diff_source);
 
         // then
         assert!(result.is_err());
@@ -354,8 +466,12 @@ mod tests {
     #[test]
     fn should_export_single_line_range_as_single_line() {
         // given - a comment with a single-line range should display as L42, not L42-L42
-        let mut session =
-            ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
 
         if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
@@ -383,8 +499,12 @@ mod tests {
     #[test]
     fn should_export_line_range_with_start_and_end() {
         // given - a comment spanning multiple lines
-        let mut session =
-            ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
 
         if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
@@ -412,8 +532,12 @@ mod tests {
     #[test]
     fn should_export_old_side_line_range_with_tilde() {
         // given - a range comment on deleted lines (old side)
-        let mut session =
-            ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
 
         if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
@@ -440,8 +564,12 @@ mod tests {
     #[test]
     fn should_export_single_old_side_line_with_tilde() {
         // given - a single line comment on a deleted line
-        let mut session =
-            ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
 
         if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
@@ -469,8 +597,12 @@ mod tests {
     #[test]
     fn should_handle_comment_without_line_range_field() {
         // given - backward compatibility: comment without line_range uses line number
-        let mut session =
-            ReviewSession::new(PathBuf::from("/tmp/test-repo"), "abc1234def".to_string());
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
         session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
 
         if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {

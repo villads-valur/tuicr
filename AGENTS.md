@@ -13,8 +13,12 @@ tuicr is a Rust terminal UI application for code reviews. Here's the module stru
 ```
 src/
 ├── main.rs              # Entry point, event loop, action dispatch
+├── config/
+│   └── mod.rs           # User config loading (XDG on Unix, %APPDATA% on Windows)
 ├── app.rs               # Application state (App struct, InputMode, etc.)
 ├── error.rs             # Error types (TuicrError enum)
+├── theme/
+│   └── mod.rs           # Theme palette definitions + CLI theme parsing/resolution
 │
 ├── vcs/                 # VCS abstraction layer
 │   ├── mod.rs           # detect_vcs(): auto-detect VCS (jj first, then git, then hg)
@@ -26,9 +30,9 @@ src/
 │   │   ├── repository.rs # CommitInfo, get_recent_commits()
 │   │   ├── diff.rs      # get_working_tree_diff(), get_commit_range_diff()
 │   │   └── context.rs   # fetch_context_lines() for gap expansion
-│   ├── hg/              # Mercurial backend (optional, --features hg)
+│   ├── hg/              # Mercurial backend (always compiled)
 │   │   └── mod.rs       # HgBackend: uses hg CLI, parses with diff_parser::Hg
-│   └── jj/              # Jujutsu backend (optional, --features jj)
+│   └── jj/              # Jujutsu backend (always compiled)
 │       └── mod.rs       # JjBackend: uses jj CLI, parses with diff_parser::GitStyle
 │
 ├── model/
@@ -69,14 +73,17 @@ src/
 **VcsBackend** (`src/vcs/traits.rs`):
 - Trait abstracting VCS operations
 - Methods: `info()`, `get_working_tree_diff()`, `fetch_context_lines()`, `get_recent_commits()`, `get_commit_range_diff()`
-- Implementations: `GitBackend` (always available), `HgBackend` (--features hg), `JjBackend` (--features jj)
+- Implementations: `GitBackend`, `HgBackend`, `JjBackend` (all always compiled)
 
 **InputMode** (`src/app.rs`):
 - `Normal` - default navigation mode
 - `Command` - after pressing `:`, vim-style commands
 - `Comment` - typing a comment (Ctrl-S saves, Ctrl-C cancels)
+- `Search` - after pressing `/`, search pattern entry
 - `Help` - showing help popup
 - `Confirm` - Y/N confirmation dialog
+- `CommitSelect` - selecting commits to review
+- `VisualSelect` - visual mode for range comments
 
 **ReviewSession** (`src/model/review.rs`):
 - Persisted review state with `files: HashMap<PathBuf, FileReview>`
@@ -88,12 +95,12 @@ src/
 
 ### Data Flow
 
-1. **Startup**: `App::new()` calls `detect_vcs()` which tries Jujutsu first (if `--features jj`), then Git, then Mercurial (if `--features hg`). Parses diff and loads existing session if any
+1. **Startup**: Parse CLI args (invalid `--theme` exits non-zero), load config from `$XDG_CONFIG_HOME/tuicr/config.toml` (default `~/.config/tuicr/config.toml`, or `%APPDATA%\tuicr\config.toml` on Windows), ignore unknown config keys with startup warnings, resolve theme precedence (`--theme` > config > dark), then call `App::new()`. `App::new()` calls `detect_vcs()` (Jujutsu first, then Git, then Mercurial), then enters commit selection mode by default. If uncommitted changes exist, the first selection row is "Uncommitted changes". With `-r/--revisions`, it opens the requested commit range directly.
 2. **Render**: `ui::render()` draws the TUI based on `App` state
 3. **Input**: `crossterm` events → `map_key_to_action` → match on Action in main loop
 4. **Persistence**: `:w` calls `save_session()`, writes JSON to `~/.local/share/tuicr/reviews/`
 5. **Reload diff**: `:e` re-runs `vcs.get_working_tree_diff()` to refresh the displayed files
-6. **Export**: `:clip` (alias `:export`) calls `export_to_clipboard()`, generating markdown and copying it to the clipboard
+6. **Export**: `:clip` (alias `:export`) calls `export_to_clipboard()`, generating markdown and copying it to the clipboard (or stdout with `--stdout` flag)
 
 ### Important Implementation Details
 
@@ -108,9 +115,20 @@ src/
 - `ratatui` + `crossterm`: TUI framework
 - `git2`: Native git operations
 - `serde` + `serde_json`: Session serialization
+- `toml`: User config parsing
 - `arboard`: Clipboard access
 - `chrono`: Timestamps
 - `thiserror` + `anyhow`: Error handling
+
+### Keeping Docs Updated
+
+When adding user-facing features, update the relevant documentation:
+
+| Document | Update when adding/changing... |
+|----------|-------------------------------|
+| `README.md` | Keybindings, commands (`:*`), CLI flags, features list, installation methods |
+| `src/ui/help_popup.rs` | Keybindings or commands (update the `help_text` vector) |
+| `AGENTS.md` | Module structure, key types, data flow, dependencies |
 
 ---
 

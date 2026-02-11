@@ -4,6 +4,7 @@ use crate::theme::Theme;
 
 pub fn header_style(theme: &Theme) -> Style {
     Style::default()
+        .bg(theme.panel_bg)
         .fg(theme.fg_primary)
         .add_modifier(Modifier::BOLD)
 }
@@ -60,6 +61,14 @@ pub fn border_style(theme: &Theme, focused: bool) -> Style {
     }
 }
 
+pub fn panel_style(theme: &Theme) -> Style {
+    Style::default().bg(theme.panel_bg).fg(theme.fg_primary)
+}
+
+pub fn popup_style(theme: &Theme) -> Style {
+    panel_style(theme)
+}
+
 pub fn status_bar_style(theme: &Theme) -> Style {
     Style::default()
         .bg(theme.status_bar_bg)
@@ -92,6 +101,10 @@ pub fn hash_style(theme: &Theme) -> Style {
     Style::default().fg(theme.cursor_color)
 }
 
+pub fn branch_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.branch_name)
+}
+
 pub fn dir_icon_style(theme: &Theme) -> Style {
     Style::default().fg(theme.diff_hunk_header)
 }
@@ -120,4 +133,8 @@ pub fn comment_border_style(theme: &Theme, comment_type: crate::model::CommentTy
 
 pub fn visual_selection_style(theme: &Theme) -> Style {
     Style::default().bg(theme.bg_highlight)
+}
+
+pub fn help_indicator_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.help_indicator).bg(theme.panel_bg)
 }

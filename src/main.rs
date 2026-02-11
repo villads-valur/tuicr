@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod error;
 mod handler;
 mod input;
@@ -6,17 +7,21 @@ mod model;
 mod output;
 mod persistence;
 mod syntax;
+mod text_edit;
 mod theme;
 mod ui;
+mod update;
 mod vcs;
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Write};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -29,11 +34,11 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use app::{App, FocusedPanel, InputMode};
 use handler::{
     handle_command_action, handle_comment_action, handle_commit_select_action,
-    handle_confirm_action, handle_diff_action, handle_file_list_action, handle_help_action,
-    handle_search_action, handle_visual_action,
+    handle_commit_selector_action, handle_confirm_action, handle_diff_action,
+    handle_file_list_action, handle_help_action, handle_search_action, handle_visual_action,
 };
 use input::{Action, map_key_to_action};
-use theme::{parse_theme_arg, resolve_theme};
+use theme::{parse_cli_args, resolve_theme_with_config};
 
 /// Timeout for the "press Ctrl+C again to exit" feature
 const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -43,7 +48,6 @@ fn main() -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic_info);
@@ -52,40 +56,80 @@ fn main() -> anyhow::Result<()> {
     // Check keyboard enhancement support before enabling raw mode
     let keyboard_enhancement_supported = matches!(supports_keyboard_enhancement(), Ok(true));
 
-    // Parse theme argument and resolve theme
+    // Parse CLI arguments and resolve theme
     // This also configures syntax highlighting colors before diff parsing
-    let theme_arg = parse_theme_arg();
-    let theme = resolve_theme(theme_arg);
+    let cli_args = parse_cli_args();
+    let mut startup_warnings = Vec::new();
+    let config_outcome = match config::load_config() {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            startup_warnings.push(format!("Failed to load config: {e}"));
+            config::ConfigLoadOutcome::default()
+        }
+    };
+    startup_warnings.extend(config_outcome.warnings);
+    let (theme, theme_warnings) = resolve_theme_with_config(
+        cli_args.theme,
+        config_outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.theme.as_deref()),
+    );
+    startup_warnings.extend(theme_warnings);
+
+    // Start update check in background (non-blocking)
+    let update_rx = if !cli_args.no_update_check {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = update::check_for_updates();
+            let _ = tx.send(result); // Ignore send error if receiver dropped
+        });
+        Some(rx)
+    } else {
+        None
+    };
 
     // Initialize app
-    let mut app = match App::new(theme) {
+    let mut app = match App::new(
+        theme,
+        cli_args.output_to_stdout,
+        cli_args.revisions.as_deref(),
+    ) {
         Ok(mut app) => {
             app.supports_keyboard_enhancement = keyboard_enhancement_supported;
+            if let Some(message) = startup_warnings.first() {
+                app.set_warning(message.clone());
+            }
             app
         }
         Err(e) => {
             eprintln!("Error: {e}");
             eprintln!(
-                "\nMake sure you're in a git, jujutsu, or mercurial repository with uncommitted changes."
+                "\nMake sure you're in a git, jujutsu, or mercurial repository with commits or uncommitted changes."
             );
             std::process::exit(1);
         }
     };
 
     // Setup terminal
+    // When --stdout is used, render TUI to /dev/tty so stdout is free for export output
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let mut tty_output: Box<dyn Write> = if cli_args.output_to_stdout {
+        Box::new(File::options().write(true).open("/dev/tty")?)
+    } else {
+        Box::new(io::stdout())
+    };
+    execute!(tty_output, EnterAlternateScreen)?;
 
     // Enable keyboard enhancement for better modifier key detection (e.g., Alt+Enter)
     // This is supported by modern terminals like Kitty, iTerm2, WezTerm, etc.
     if keyboard_enhancement_supported {
         let _ = execute!(
-            stdout,
+            tty_output,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(tty_output);
     let mut terminal = Terminal::new(backend)?;
 
     // Track pending z command for zz centering
@@ -103,6 +147,16 @@ fn main() -> anyhow::Result<()> {
         terminal.draw(|frame| {
             ui::render(frame, &mut app);
         })?;
+
+        // Check for update result (non-blocking)
+        if let Some(ref rx) = update_rx
+            && let Ok(
+                update::UpdateCheckResult::UpdateAvailable(info)
+                | update::UpdateCheckResult::AheadOfRelease(info),
+            ) = rx.try_recv()
+        {
+            app.update_info = Some(info);
+        }
 
         // Auto-clear expired pending Ctrl+C state and message
         if let Some(first_press) = pending_ctrl_c
@@ -170,7 +224,7 @@ fn main() -> anyhow::Result<()> {
                         // Otherwise fall through to normal handling
                     }
 
-                    // Handle pending ; command for ;e toggle file list, ;h/;l panel focus
+                    // Handle pending ; command for ;e toggle file list, ;h/;l/;k/;j panel focus
                     if pending_semicolon {
                         pending_semicolon = false;
                         match key.code {
@@ -183,6 +237,16 @@ fn main() -> anyhow::Result<()> {
                                 continue;
                             }
                             crossterm::event::KeyCode::Char('l') => {
+                                app.focused_panel = app::FocusedPanel::Diff;
+                                continue;
+                            }
+                            crossterm::event::KeyCode::Char('k') => {
+                                if app.has_inline_commit_selector() {
+                                    app.focused_panel = app::FocusedPanel::CommitSelector;
+                                }
+                                continue;
+                            }
+                            crossterm::event::KeyCode::Char('j') => {
                                 app.focused_panel = app::FocusedPanel::Diff;
                                 continue;
                             }
@@ -222,68 +286,10 @@ fn main() -> anyhow::Result<()> {
                         InputMode::Normal => match app.focused_panel {
                             FocusedPanel::FileList => handle_file_list_action(&mut app, action),
                             FocusedPanel::Diff => handle_diff_action(&mut app, action),
+                            FocusedPanel::CommitSelector => {
+                                handle_commit_selector_action(&mut app, action)
+                            }
                         },
-                    }
-                }
-                Event::Mouse(mouse_event) => {
-                    use crossterm::event::MouseEventKind;
-
-                    // Helper to determine which panel the mouse is over
-                    let mouse_col = mouse_event.column;
-                    let mouse_row = mouse_event.row;
-
-                    let over_file_list = app
-                        .file_list_area
-                        .map(|area| {
-                            mouse_col >= area.x
-                                && mouse_col < area.x + area.width
-                                && mouse_row >= area.y
-                                && mouse_row < area.y + area.height
-                        })
-                        .unwrap_or(false);
-
-                    let over_diff = app
-                        .diff_area
-                        .map(|area| {
-                            mouse_col >= area.x
-                                && mouse_col < area.x + area.width
-                                && mouse_row >= area.y
-                                && mouse_row < area.y + area.height
-                        })
-                        .unwrap_or(false);
-
-                    match mouse_event.kind {
-                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                            // Click to focus panel
-                            if app.input_mode == InputMode::Normal {
-                                if over_file_list {
-                                    app.focused_panel = FocusedPanel::FileList;
-                                } else if over_diff {
-                                    app.focused_panel = FocusedPanel::Diff;
-                                }
-                            }
-                        }
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            let action = match mouse_event.kind {
-                                MouseEventKind::ScrollUp => Action::MouseScrollUp(3),
-                                MouseEventKind::ScrollDown => Action::MouseScrollDown(3),
-                                _ => unreachable!(),
-                            };
-
-                            // Dispatch action based on which panel the mouse is over
-                            match app.input_mode {
-                                InputMode::Help => handle_help_action(&mut app, action),
-                                InputMode::Normal => {
-                                    if over_file_list {
-                                        handle_file_list_action(&mut app, action);
-                                    } else if over_diff {
-                                        handle_diff_action(&mut app, action);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 _ => {}
@@ -297,9 +303,13 @@ fn main() -> anyhow::Result<()> {
 
     // Restore terminal
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
-    execute!(terminal.backend_mut(), DisableMouseCapture)?;
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    // Print pending stdout output if --stdout was used
+    if let Some(output) = app.pending_stdout_output {
+        print!("{output}");
+    }
 
     Ok(())
 }

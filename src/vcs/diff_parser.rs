@@ -244,9 +244,17 @@ where
         line_numbers.push((old_ln, new_ln));
     }
 
-    // Apply syntax highlighting if we have a file path
-    let highlighted_lines =
-        file_path.and_then(|path| highlighter.highlight_file_lines(path, &line_contents));
+    // Apply syntax highlighting by side-specific sequence to keep parser state valid.
+    let highlight_sequences =
+        SyntaxHighlighter::split_diff_lines_for_highlighting(&line_contents, &line_origins);
+    let (old_highlighted_lines, new_highlighted_lines) = if let Some(path) = file_path {
+        (
+            highlighter.highlight_file_lines(path, &highlight_sequences.old_lines),
+            highlighter.highlight_file_lines(path, &highlight_sequences.new_lines),
+        )
+    } else {
+        (None, None)
+    };
 
     // Build DiffLines
     let mut diff_lines: Vec<DiffLine> = Vec::with_capacity(line_contents.len());
@@ -254,10 +262,13 @@ where
         let origin = line_origins[idx];
         let (old_lineno, new_lineno) = line_numbers[idx];
 
-        let highlighted_spans = highlighted_lines.as_ref().and_then(|all| {
-            all.get(idx)
-                .map(|spans| highlighter.apply_diff_background(spans.clone(), origin))
-        });
+        let highlighted_spans = highlighter.highlighted_line_for_diff_with_background(
+            old_highlighted_lines.as_deref(),
+            new_highlighted_lines.as_deref(),
+            highlight_sequences.old_line_indices[idx],
+            highlight_sequences.new_line_indices[idx],
+            origin,
+        );
 
         diff_lines.push(DiffLine {
             origin,
@@ -693,6 +704,32 @@ copy to dest.rs
         assert_eq!(files[0].status, FileStatus::Modified);
         assert_eq!(files[0].hunks.len(), 1);
         assert_eq!(files[0].hunks[0].lines.len(), 4);
+    }
+
+    #[test]
+    fn jj_should_keep_highlighting_for_interleaved_typescript_hunk() {
+        let diff = r#"diff --git a/file.ts b/file.ts
+--- a/file.ts
++++ b/file.ts
+@@ -1,3 +1,4 @@
+ const msg = getMsg(
+-    "old argument"
++    "new argument",
++    { extra: true }
+ );
+"#;
+
+        let files =
+            parse_unified_diff(diff, DiffFormat::GitStyle, &SyntaxHighlighter::default()).unwrap();
+        let lines = &files[0].hunks[0].lines;
+
+        assert_eq!(lines.len(), 5);
+        for (idx, line) in lines.iter().enumerate() {
+            assert!(
+                line.highlighted_spans.is_some(),
+                "line {idx} should retain highlighting"
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Jujutsu (jj) backend implementation using CLI commands.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,13 +50,40 @@ impl JjBackend {
         .unwrap_or_else(|_| "unknown".to_string());
 
         // jj doesn't have branches in the traditional sense, but we can show the bookmark if set
+        // First check if @ has a bookmark directly, otherwise find the closest ancestor bookmark
         let branch_name = run_jj_command(
             &root_path,
             &["log", "-r", "@", "--no-graph", "-T", "bookmarks"],
         )
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            // Find the closest bookmark in ancestors using heads(::@ & bookmarks())
+            run_jj_command(
+                &root_path,
+                &[
+                    "log",
+                    "-r",
+                    "heads(::@ & bookmarks())",
+                    "--no-graph",
+                    "-T",
+                    "bookmarks",
+                    "--limit",
+                    "1",
+                ],
+            )
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        })
+        // Extract first local bookmark (filter out remote tracking like "name@upstream")
+        .map(|s| {
+            s.split_whitespace()
+                .find(|b| !b.contains('@'))
+                .unwrap_or_else(|| s.split_whitespace().next().unwrap_or(&s))
+                .to_string()
+        });
 
         let info = VcsInfo {
             root_path,
@@ -129,10 +157,45 @@ impl VcsBackend for JjBackend {
         Ok(result)
     }
 
-    fn get_recent_commits(&self, count: usize) -> Result<Vec<CommitInfo>> {
+    fn resolve_revisions(&self, revisions: &str) -> Result<Vec<String>> {
+        // Use jj log to resolve the revisions to commit IDs, reverse-chronological by default.
+        // We reverse the result so the oldest commit is first (matching get_commit_range_diff expectations).
+        let output = run_jj_command(
+            &self.info.root_path,
+            &[
+                "log",
+                "-r",
+                revisions,
+                "--no-graph",
+                "-T",
+                r#"commit_id ++ "\n""#,
+            ],
+        )?;
+
+        let mut commit_ids: Vec<String> = output
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+
+        if commit_ids.is_empty() {
+            return Err(TuicrError::NoChanges);
+        }
+
+        // jj log outputs newest first; reverse so oldest is first
+        commit_ids.reverse();
+        Ok(commit_ids)
+    }
+
+    fn get_recent_commits(&self, offset: usize, limit: usize) -> Result<Vec<CommitInfo>> {
         // Use jj log with a template to get structured output
         // Template fields separated by \x00, records separated by \x01
         // Note: jj uses change_id for identifying changes, commit_id for the underlying git commit
+        //
+        // jj log doesn't have a --skip option, so we fetch offset+limit commits
+        // and skip the first `offset` in Rust code
+        let fetch_count = offset + limit;
         let template = r#"commit_id ++ "\x00" ++ commit_id.short() ++ "\x00" ++ description.first_line() ++ "\x00" ++ author.email() ++ "\x00" ++ committer.timestamp() ++ "\x01""#;
         let output = run_jj_command(
             &self.info.root_path,
@@ -141,7 +204,7 @@ impl VcsBackend for JjBackend {
                 "-r",
                 "::@",
                 "--limit",
-                &count.to_string(),
+                &fetch_count.to_string(),
                 "--no-graph",
                 "-T",
                 template,
@@ -173,13 +236,14 @@ impl VcsBackend for JjBackend {
             commits.push(CommitInfo {
                 id,
                 short_id,
+                branch_name: None,
                 summary,
                 author,
                 time,
             });
         }
 
-        Ok(commits)
+        Ok(commits.into_iter().skip(offset).collect())
     }
 
     fn get_commit_range_diff(
@@ -205,6 +269,88 @@ impl VcsBackend for JjBackend {
                 &format!("{}-", oldest),
                 "--to",
                 newest,
+                "--git",
+            ],
+        )?;
+
+        if diff_output.trim().is_empty() {
+            return Err(TuicrError::NoChanges);
+        }
+
+        diff_parser::parse_unified_diff(&diff_output, DiffFormat::GitStyle, highlighter)
+    }
+
+    fn get_commits_info(&self, ids: &[String]) -> Result<Vec<CommitInfo>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Use jj log with a revset matching the given IDs
+        let revset = ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let template = r#"commit_id ++ "\x00" ++ commit_id.short() ++ "\x00" ++ description.first_line() ++ "\x00" ++ author.email() ++ "\x00" ++ committer.timestamp() ++ "\x01""#;
+        let output = run_jj_command(
+            &self.info.root_path,
+            &["log", "-r", &revset, "--no-graph", "-T", template],
+        )?;
+
+        let mut by_id: HashMap<String, CommitInfo> = HashMap::new();
+        for record in output.split('\x01') {
+            let record = record.trim();
+            if record.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = record.split('\x00').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+            let id = parts[0].to_string();
+            let short_id = parts[1].to_string();
+            let summary = parts[2].to_string();
+            let author = parts[3].to_string();
+            let time = DateTime::parse_from_rfc3339(parts[4])
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            by_id.insert(
+                id.clone(),
+                CommitInfo {
+                    id,
+                    short_id,
+                    branch_name: None,
+                    summary,
+                    author,
+                    time,
+                },
+            );
+        }
+
+        // Return in input order
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
+
+    fn get_working_tree_with_commits_diff(
+        &self,
+        commit_ids: &[String],
+        highlighter: &SyntaxHighlighter,
+    ) -> Result<Vec<DiffFile>> {
+        if commit_ids.is_empty() {
+            return Err(TuicrError::NoChanges);
+        }
+
+        // commit_ids are ordered from oldest to newest
+        let oldest = &commit_ids[0];
+
+        // Diff from the parent of the oldest commit to the working copy (@)
+        let diff_output = run_jj_command(
+            &self.info.root_path,
+            &[
+                "diff",
+                "--from",
+                &format!("{}-", oldest),
+                "--to",
+                "@",
                 "--git",
             ],
         )?;
@@ -444,7 +590,7 @@ mod tests {
             JjBackend::from_path(temp.path().to_path_buf()).expect("Failed to create jj backend");
 
         let commits = backend
-            .get_recent_commits(5)
+            .get_recent_commits(0, 5)
             .expect("Failed to get commits");
 
         // jj creates a working copy commit on top, so we may have 4 commits
@@ -486,7 +632,7 @@ mod tests {
             JjBackend::from_path(temp.path().to_path_buf()).expect("Failed to create jj backend");
 
         let commits = backend
-            .get_recent_commits(10)
+            .get_recent_commits(0, 10)
             .expect("Failed to get commits");
         assert!(commits.len() >= 3, "Expected at least 3 commits");
 
@@ -657,5 +803,174 @@ mod tests {
         let path = file.display_path();
         assert_eq!(path.to_str().unwrap(), "image.png");
         assert_eq!(file.status, FileStatus::Deleted);
+    }
+
+    /// Create a test repo with a bookmark on the current revision.
+    fn setup_test_repo_with_bookmark_on_current() -> Option<tempfile::TempDir> {
+        if !jj_available() {
+            return None;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let root = temp_dir.path();
+
+        // Initialize jj repo
+        let output = Command::new("jj")
+            .args(["git", "init"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to init jj repo");
+
+        if !output.status.success() {
+            return None;
+        }
+
+        // Create initial file and commit
+        fs::write(root.join("file.txt"), "content\n").expect("Failed to write file");
+        Command::new("jj")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to commit");
+
+        // Create a bookmark on @
+        Command::new("jj")
+            .args(["bookmark", "create", "my-feature", "-r", "@"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to create bookmark");
+
+        Some(temp_dir)
+    }
+
+    #[test]
+    fn test_jj_bookmark_on_current_revision() {
+        let Some(temp) = setup_test_repo_with_bookmark_on_current() else {
+            eprintln!("Skipping test: jj command not available");
+            return;
+        };
+
+        let backend =
+            JjBackend::from_path(temp.path().to_path_buf()).expect("Failed to create jj backend");
+        let info = backend.info();
+
+        assert_eq!(
+            info.branch_name.as_deref(),
+            Some("my-feature"),
+            "Expected bookmark 'my-feature' to be detected"
+        );
+    }
+
+    /// Create a test repo with a bookmark on an ancestor revision.
+    fn setup_test_repo_with_bookmark_on_ancestor() -> Option<tempfile::TempDir> {
+        if !jj_available() {
+            return None;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let root = temp_dir.path();
+
+        // Initialize jj repo
+        let output = Command::new("jj")
+            .args(["git", "init"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to init jj repo");
+
+        if !output.status.success() {
+            return None;
+        }
+
+        // Create initial file and commit
+        fs::write(root.join("file.txt"), "content\n").expect("Failed to write file");
+        Command::new("jj")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to commit");
+
+        // Create a bookmark on the commit we just made (now @-)
+        Command::new("jj")
+            .args(["bookmark", "create", "main", "-r", "@-"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to create bookmark");
+
+        // Make another commit so @ is ahead of the bookmark
+        fs::write(root.join("file2.txt"), "more content\n").expect("Failed to write file");
+        Command::new("jj")
+            .args(["commit", "-m", "Second commit"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to commit");
+
+        Some(temp_dir)
+    }
+
+    #[test]
+    fn test_jj_bookmark_on_ancestor_revision() {
+        let Some(temp) = setup_test_repo_with_bookmark_on_ancestor() else {
+            eprintln!("Skipping test: jj command not available");
+            return;
+        };
+
+        let backend =
+            JjBackend::from_path(temp.path().to_path_buf()).expect("Failed to create jj backend");
+        let info = backend.info();
+
+        assert_eq!(
+            info.branch_name.as_deref(),
+            Some("main"),
+            "Expected ancestor bookmark 'main' to be detected"
+        );
+    }
+
+    /// Create a test repo with no bookmarks.
+    fn setup_test_repo_without_bookmarks() -> Option<tempfile::TempDir> {
+        if !jj_available() {
+            return None;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let root = temp_dir.path();
+
+        // Initialize jj repo
+        let output = Command::new("jj")
+            .args(["git", "init"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to init jj repo");
+
+        if !output.status.success() {
+            return None;
+        }
+
+        // Create initial file and commit (no bookmarks)
+        fs::write(root.join("file.txt"), "content\n").expect("Failed to write file");
+        Command::new("jj")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(root)
+            .output()
+            .expect("Failed to commit");
+
+        Some(temp_dir)
+    }
+
+    #[test]
+    fn test_jj_no_bookmarks() {
+        let Some(temp) = setup_test_repo_without_bookmarks() else {
+            eprintln!("Skipping test: jj command not available");
+            return;
+        };
+
+        let backend =
+            JjBackend::from_path(temp.path().to_path_buf()).expect("Failed to create jj backend");
+        let info = backend.info();
+
+        assert!(
+            info.branch_name.is_none(),
+            "Expected no bookmark when none exist, got {:?}",
+            info.branch_name
+        );
     }
 }
