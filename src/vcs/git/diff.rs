@@ -1,4 +1,4 @@
-use git2::{BranchType, Delta, Diff, DiffOptions, Oid, Repository};
+use git2::{Delta, Diff, DiffOptions, Oid, Repository};
 use std::path::PathBuf;
 
 use crate::error::{Result, TuicrError};
@@ -147,26 +147,6 @@ fn resolve_base_reference(repo: &Repository, explicit_base: Option<&str>) -> Res
             TuicrError::VcsCommand(format!("Could not resolve base reference '{base_ref}'"))
         })?;
         return Ok((base_ref.to_string(), oid));
-    }
-
-    if let Ok(head) = repo.head()
-        && head.is_branch()
-        && let Some(branch_name) = head.shorthand()
-        && let Ok(branch) = repo.find_branch(branch_name, BranchType::Local)
-        && let Ok(upstream) = branch.upstream()
-        && let Some(upstream_ref_name) = upstream.get().name()
-        && let Ok(oid) = resolve_ref_to_oid(repo, upstream_ref_name)
-    {
-        // Skip if the upstream is just the remote copy of the current branch
-        // (e.g. origin/feat-x for branch feat-x), since it's not a useful PR base.
-        let upstream_short = upstream.get().shorthand().unwrap_or(upstream_ref_name);
-        let is_same_branch = upstream_short
-            .split_once('/')
-            .map(|(_, upstream_branch_name)| upstream_branch_name == branch_name)
-            .unwrap_or(false);
-        if !is_same_branch {
-            return Ok((upstream_ref_name.to_string(), oid));
-        }
     }
 
     if let Ok(origin_head) = repo.find_reference("refs/remotes/origin/HEAD")
