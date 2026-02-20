@@ -2122,6 +2122,9 @@ impl App {
 
     pub fn toggle_file_list(&mut self) {
         self.show_file_list = !self.show_file_list;
+        if !self.show_file_list && self.focused_panel == FocusedPanel::FileList {
+            self.focused_panel = FocusedPanel::Diff;
+        }
         let status = if self.show_file_list {
             "visible"
         } else {
