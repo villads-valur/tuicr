@@ -1,6 +1,6 @@
 [package]
 name = "tuicr"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 description = "Review AI-generated diffs like a GitHub pull request, right from your terminal."
 license = "MIT"
@@ -37,6 +37,7 @@ unicode-width = "0.2"
 uuid = { version = "1.0", features = ["v4"] }
 arboard = { version = "3.4", features = ["wayland-data-control"] }
 base64 = "0.22"
+ignore = "0.4"
 
 # Syntax highlighting
 syntect = "5.2"
