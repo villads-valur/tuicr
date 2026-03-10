@@ -2,7 +2,7 @@
 //!
 //! Provides dark and light themes with automatic terminal background detection.
 
-use std::{process::Command, sync::OnceLock};
+use std::sync::OnceLock;
 
 use ratatui::style::Color;
 use two_face::theme::EmbeddedThemeName;
@@ -721,7 +721,6 @@ pub enum ThemeArg {
     Light,
     AyuLight,
     Onedark,
-    System,
     CatppuccinLatte,
     CatppuccinFrappe,
     CatppuccinMacchiato,
@@ -730,12 +729,11 @@ pub enum ThemeArg {
     GruvboxLight,
 }
 
-const THEME_CHOICES: [(&str, ThemeArg); 11] = [
+const THEME_CHOICES: [(&str, ThemeArg); 10] = [
     ("dark", ThemeArg::Dark),
     ("light", ThemeArg::Light),
     ("ayu-light", ThemeArg::AyuLight),
     ("onedark", ThemeArg::Onedark),
-    ("system", ThemeArg::System),
     ("catppuccin-latte", ThemeArg::CatppuccinLatte),
     ("catppuccin-frappe", ThemeArg::CatppuccinFrappe),
     ("catppuccin-macchiato", ThemeArg::CatppuccinMacchiato),
@@ -788,7 +786,6 @@ pub fn resolve_theme(arg: ThemeArg) -> Theme {
         ThemeArg::Light => Theme::light(),
         ThemeArg::AyuLight => Theme::ayu_light(),
         ThemeArg::Onedark => Theme::onedark(),
-        ThemeArg::System => resolve_theme(resolve_system_theme()),
         ThemeArg::CatppuccinLatte => Theme::catppuccin_latte(),
         ThemeArg::CatppuccinFrappe => Theme::catppuccin_frappe(),
         ThemeArg::CatppuccinMacchiato => Theme::catppuccin_macchiato(),
@@ -796,90 +793,6 @@ pub fn resolve_theme(arg: ThemeArg) -> Theme {
         ThemeArg::GruvboxDark => Theme::gruvbox_dark(),
         ThemeArg::GruvboxLight => Theme::gruvbox_light(),
     }
-}
-
-fn resolve_system_theme() -> ThemeArg {
-    if is_system_dark_mode().unwrap_or(true) {
-        ThemeArg::Dark
-    } else {
-        ThemeArg::Light
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn is_system_dark_mode() -> Option<bool> {
-    let output = Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return Some(false);
-    }
-
-    let value = String::from_utf8_lossy(&output.stdout);
-    Some(value.trim().eq_ignore_ascii_case("dark"))
-}
-
-#[cfg(target_os = "windows")]
-fn is_system_dark_mode() -> Option<bool> {
-    let output = Command::new("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            "/v",
-            "AppsUseLightTheme",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let value = String::from_utf8_lossy(&output.stdout);
-    if value.contains("0x0") {
-        Some(true)
-    } else if value.contains("0x1") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn is_system_dark_mode() -> Option<bool> {
-    let color_scheme = Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
-        .output()
-        .ok();
-    if let Some(output) = color_scheme
-        && output.status.success()
-    {
-        let value = String::from_utf8_lossy(&output.stdout);
-        if value.contains("prefer-dark") {
-            return Some(true);
-        }
-        if value.contains("default") || value.contains("prefer-light") {
-            return Some(false);
-        }
-    }
-
-    let gtk_theme = Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "gtk-theme"])
-        .output()
-        .ok();
-    if let Some(output) = gtk_theme
-        && output.status.success()
-    {
-        let value = String::from_utf8_lossy(&output.stdout);
-        if value.to_ascii_lowercase().contains("dark") {
-            return Some(true);
-        }
-        return Some(false);
-    }
-
-    None
 }
 
 pub fn resolve_theme_arg_with_config(
@@ -1072,12 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn should_parse_system_theme() {
-        let parsed = parse_for_test(&["tuicr", "--theme", "system"]).expect("parse should succeed");
-        assert_eq!(parsed.theme, Some(ThemeArg::System));
-    }
-
-    #[test]
     fn should_parse_gruvbox_themes() {
         let parsed =
             parse_for_test(&["tuicr", "--theme", "gruvbox-dark"]).expect("parse should succeed");
@@ -1161,13 +1068,6 @@ mod tests {
     fn should_use_catppuccin_theme_from_config_when_cli_missing() {
         let (resolved, warnings) = resolve_theme_arg_with_config(None, Some("catppuccin-fRappe"));
         assert_eq!(resolved, ThemeArg::CatppuccinFrappe);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn should_use_system_theme_from_config_when_cli_missing() {
-        let (resolved, warnings) = resolve_theme_arg_with_config(None, Some("system"));
-        assert_eq!(resolved, ThemeArg::System);
         assert!(warnings.is_empty());
     }
 
