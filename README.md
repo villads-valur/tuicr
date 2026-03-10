@@ -104,7 +104,7 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 | `-r` / `--revisions <REVSET>` | Commit range/Revision set to review. Exact syntax depends on VCS backend (Git, JJ, Hg) |
 | `--pr` | Review branch changes as a PR diff (`merge-base(base, HEAD)..HEAD`) |
 | `--base <REF>` | Base ref for PR mode (implies `--pr`), for example `origin/main` |
-| `--theme <THEME>` | Color theme override (`dark`, `light`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `gruvbox-dark`, `gruvbox-light`) |
+| `--theme <THEME>` | Color theme override (`dark`, `light`, `ayu-light`, `onedark`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `gruvbox-dark`, `gruvbox-light`) |
 | `--stdout` | Output to stdout instead of clipboard when exporting |
 | `--no-update-check` | Skip checking for updates on startup |
 
