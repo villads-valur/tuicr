@@ -317,6 +317,140 @@ impl Theme {
         catppuccin_theme(flavor, EmbeddedThemeName::CatppuccinMocha)
     }
 
+    pub fn ayu_light() -> Self {
+        Self {
+            highlighter: OnceLock::new(),
+
+            // Base colors
+            panel_bg: Color::Rgb(250, 250, 250),
+            bg_highlight: Color::Rgb(240, 238, 228),
+            fg_primary: Color::Rgb(92, 103, 115),
+            fg_secondary: Color::Rgb(107, 118, 130),
+            fg_dim: Color::Rgb(171, 176, 182),
+
+            // Diff colors
+            diff_add: Color::Rgb(134, 179, 0),
+            diff_add_bg: Color::Rgb(238, 247, 208),
+            diff_del: Color::Rgb(240, 113, 120),
+            diff_del_bg: Color::Rgb(253, 235, 236),
+            diff_context: Color::Rgb(92, 103, 115),
+            diff_hunk_header: Color::Rgb(54, 163, 217),
+            expanded_context_fg: Color::Rgb(130, 140, 153),
+
+            // Syntax highlighting diff backgrounds
+            syntax_add_bg: Color::Rgb(244, 251, 228),
+            syntax_del_bg: Color::Rgb(255, 241, 242),
+
+            // Syntect theme for syntax highlighting
+            syntect_theme: EmbeddedThemeName::OneHalfLight,
+
+            // File status colors
+            file_added: Color::Rgb(134, 179, 0),
+            file_modified: Color::Rgb(231, 197, 71),
+            file_deleted: Color::Rgb(240, 113, 120),
+            file_renamed: Color::Rgb(163, 122, 204),
+
+            // Review status colors
+            reviewed: Color::Rgb(134, 179, 0),
+            pending: Color::Rgb(231, 197, 71),
+
+            // Comment type colors
+            comment_note: Color::Rgb(54, 163, 217),
+            comment_suggestion: Color::Rgb(76, 191, 153),
+            comment_issue: Color::Rgb(240, 113, 120),
+            comment_praise: Color::Rgb(134, 179, 0),
+
+            // UI element colors
+            border_focused: Color::Rgb(54, 163, 217),
+            border_unfocused: Color::Rgb(217, 216, 215),
+            status_bar_bg: Color::Rgb(255, 255, 255),
+            cursor_color: Color::Rgb(255, 106, 0),
+            branch_name: Color::Rgb(54, 163, 217),
+            help_indicator: Color::Rgb(171, 176, 182),
+
+            // Message/update badge colors
+            message_info_fg: Color::Black,
+            message_info_bg: Color::Rgb(140, 220, 255),
+            message_warning_fg: Color::Black,
+            message_warning_bg: Color::Rgb(246, 217, 140),
+            message_error_fg: Color::White,
+            message_error_bg: Color::Rgb(217, 87, 87),
+            update_badge_fg: Color::Black,
+            update_badge_bg: Color::Rgb(246, 217, 140),
+
+            // Mode indicator colors
+            mode_fg: Color::White,
+            mode_bg: Color::Rgb(255, 106, 0),
+        }
+    }
+
+    pub fn onedark() -> Self {
+        Self {
+            highlighter: OnceLock::new(),
+
+            // Base colors
+            panel_bg: Color::Rgb(40, 44, 52),
+            bg_highlight: Color::Rgb(62, 68, 82),
+            fg_primary: Color::Rgb(171, 178, 191),
+            fg_secondary: Color::Rgb(192, 198, 208),
+            fg_dim: Color::Rgb(92, 99, 112),
+
+            // Diff colors
+            diff_add: Color::Rgb(152, 195, 121),
+            diff_add_bg: Color::Rgb(44, 56, 43),
+            diff_del: Color::Rgb(224, 108, 117),
+            diff_del_bg: Color::Rgb(58, 45, 47),
+            diff_context: Color::Rgb(171, 178, 191),
+            diff_hunk_header: Color::Rgb(86, 182, 194),
+            expanded_context_fg: Color::Rgb(92, 99, 112),
+
+            // Syntax highlighting diff backgrounds
+            syntax_add_bg: Color::Rgb(37, 49, 38),
+            syntax_del_bg: Color::Rgb(59, 37, 40),
+
+            // Syntect theme for syntax highlighting
+            syntect_theme: EmbeddedThemeName::OneHalfDark,
+
+            // File status colors
+            file_added: Color::Rgb(152, 195, 121),
+            file_modified: Color::Rgb(229, 192, 123),
+            file_deleted: Color::Rgb(224, 108, 117),
+            file_renamed: Color::Rgb(198, 120, 221),
+
+            // Review status colors
+            reviewed: Color::Rgb(152, 195, 121),
+            pending: Color::Rgb(229, 192, 123),
+
+            // Comment type colors
+            comment_note: Color::Rgb(97, 175, 239),
+            comment_suggestion: Color::Rgb(86, 182, 194),
+            comment_issue: Color::Rgb(224, 108, 117),
+            comment_praise: Color::Rgb(152, 195, 121),
+
+            // UI element colors
+            border_focused: Color::Rgb(97, 175, 239),
+            border_unfocused: Color::Rgb(62, 68, 82),
+            status_bar_bg: Color::Rgb(33, 37, 43),
+            cursor_color: Color::Rgb(229, 192, 123),
+            branch_name: Color::Rgb(86, 182, 194),
+            help_indicator: Color::Rgb(92, 99, 112),
+
+            // Message/update badge colors
+            message_info_fg: Color::Black,
+            message_info_bg: Color::Rgb(86, 182, 194),
+            message_warning_fg: Color::Black,
+            message_warning_bg: Color::Rgb(229, 192, 123),
+            message_error_fg: Color::White,
+            message_error_bg: Color::Rgb(224, 108, 117),
+            update_badge_fg: Color::Black,
+            update_badge_bg: Color::Rgb(229, 192, 123),
+
+            // Mode indicator colors
+            mode_fg: Color::Rgb(40, 44, 52),
+            mode_bg: Color::Rgb(97, 175, 239),
+        }
+    }
+
     pub fn gruvbox_dark() -> Self {
         let flavor = GruvboxFlavor {
             dark: true,
@@ -585,6 +719,8 @@ pub enum ThemeArg {
     #[default]
     Dark,
     Light,
+    AyuLight,
+    Onedark,
     CatppuccinLatte,
     CatppuccinFrappe,
     CatppuccinMacchiato,
@@ -593,9 +729,11 @@ pub enum ThemeArg {
     GruvboxLight,
 }
 
-const THEME_CHOICES: [(&str, ThemeArg); 8] = [
+const THEME_CHOICES: [(&str, ThemeArg); 10] = [
     ("dark", ThemeArg::Dark),
     ("light", ThemeArg::Light),
+    ("ayu-light", ThemeArg::AyuLight),
+    ("onedark", ThemeArg::Onedark),
     ("catppuccin-latte", ThemeArg::CatppuccinLatte),
     ("catppuccin-frappe", ThemeArg::CatppuccinFrappe),
     ("catppuccin-macchiato", ThemeArg::CatppuccinMacchiato),
@@ -685,6 +823,8 @@ pub fn resolve_theme(arg: ThemeArg) -> Theme {
     match arg {
         ThemeArg::Dark => Theme::dark(),
         ThemeArg::Light => Theme::light(),
+        ThemeArg::AyuLight => Theme::ayu_light(),
+        ThemeArg::Onedark => Theme::onedark(),
         ThemeArg::CatppuccinLatte => Theme::catppuccin_latte(),
         ThemeArg::CatppuccinFrappe => Theme::catppuccin_frappe(),
         ThemeArg::CatppuccinMacchiato => Theme::catppuccin_macchiato(),
@@ -1097,6 +1237,20 @@ mod tests {
     }
 
     #[test]
+    fn should_parse_ayu_light_theme() {
+        let parsed =
+            parse_for_test(&["tuicr", "--theme", "ayu-light"]).expect("parse should succeed");
+        assert_eq!(parsed.theme, Some(ThemeArg::AyuLight));
+    }
+
+    #[test]
+    fn should_parse_onedark_theme() {
+        let parsed =
+            parse_for_test(&["tuicr", "--theme", "onedark"]).expect("parse should succeed");
+        assert_eq!(parsed.theme, Some(ThemeArg::Onedark));
+    }
+
+    #[test]
     fn should_parse_gruvbox_themes() {
         let parsed =
             parse_for_test(&["tuicr", "--theme", "gruvbox-dark"]).expect("parse should succeed");
@@ -1263,6 +1417,18 @@ mod tests {
     fn should_resolve_gruvbox_light_to_light_syntect_theme() {
         let theme = resolve_theme(ThemeArg::GruvboxLight);
         assert_eq!(theme.syntect_theme, EmbeddedThemeName::GruvboxLight);
+    }
+
+    #[test]
+    fn should_resolve_ayu_light_to_onehalf_light_syntect_theme() {
+        let theme = resolve_theme(ThemeArg::AyuLight);
+        assert_eq!(theme.syntect_theme, EmbeddedThemeName::OneHalfLight);
+    }
+
+    #[test]
+    fn should_resolve_onedark_to_onehalf_dark_syntect_theme() {
+        let theme = resolve_theme(ThemeArg::Onedark);
+        assert_eq!(theme.syntect_theme, EmbeddedThemeName::OneHalfDark);
     }
 
     #[test]
