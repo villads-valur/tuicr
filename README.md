@@ -122,18 +122,28 @@ Set a default theme in:
 - Linux/macOS: `$XDG_CONFIG_HOME/tuicr/config.toml` (default: `~/.config/tuicr/config.toml`)
 - Windows: `%APPDATA%\tuicr\config.toml`
 
-Example:
+Examples:
 
 ```toml
+# Optional single theme (legacy behavior)
 theme = "catppuccin-mocha"
+
+# Appearance mode defaults to system when not set
+appearance = "system"
+
+# Optional split variants (recommended)
+theme_dark = "onedark"
+theme_light = "ayu-light"
 ```
 
 Theme resolution precedence:
 1. `--theme <THEME>`
 2. `theme` in config file path above (OS-specific)
-3. `--appearance <MODE>` (only when no explicit theme is set)
-4. `appearance` in config (only when no explicit theme is set)
-5. built-in default (`dark`)
+3. `theme_dark` + `theme_light` in config (selected by appearance)
+4. `theme_dark` only or `theme_light` only in config (appearance ignored)
+5. `--appearance <MODE>` (only when no explicit theme or variant is set)
+6. `appearance` in config (only when no explicit theme or variant is set)
+7. built-in default (`system`)
 
 `--appearance system` follows your OS appearance (light/dark) at startup.
 
