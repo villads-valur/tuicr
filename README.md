@@ -225,7 +225,7 @@ dist/
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Cycle comment type (Note → Suggestion → Issue → Praise) |
+| `Tab` | Cycle comment type (Note → Suggestion → Issue → Praise → Question) |
 | `Enter` / `Ctrl-Enter` / `Ctrl-s` | Save comment |
 | `Shift-Enter` / `Ctrl-j` | Insert newline |
 | `←` / `→` | Move cursor |
@@ -291,7 +291,7 @@ When you export your review (`:clip` or confirm on `:wq`), `tuicr` copies struct
 ```markdown
 I reviewed your code and have the following comments. Please address them.
 
-Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback)
+Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback), QUESTION (clarifications to answer)
 
 1. **[SUGGESTION]** `src/auth.rs` - Consider adding unit tests
 2. **[ISSUE]** `src/auth.rs:42` - Magic number should be a named constant

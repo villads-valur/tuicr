@@ -38,7 +38,7 @@ src/
 │
 ├── model/
 │   ├── mod.rs
-│   ├── comment.rs       # Comment, CommentType (Note/Suggestion/Issue/Praise)
+│   ├── comment.rs       # Comment, CommentType (Note/Suggestion/Issue/Praise/Question)
 │   ├── diff_types.rs    # DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin
 │   └── review.rs        # ReviewSession, FileReview (the persisted review state)
 │
@@ -144,7 +144,7 @@ When a user reviews your changes with tuicr, they will provide you with a struct
 ```markdown
 I reviewed your code and have the following comments. Please address them.
 
-Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback)
+Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback), QUESTION (clarifications to answer)
 
 Summary: {optional overall notes}
 
@@ -160,6 +160,7 @@ Summary: {optional overall notes}
 | **[ISSUE]** | Problem that must be fixed | Yes - address before proceeding |
 | **[SUGGESTION]** | Improvement recommendation | Consider implementing |
 | **[NOTE]** | Observation or question | Respond or acknowledge |
+| **[QUESTION]** | Clarification request | Answer before proceeding |
 | **[PRAISE]** | Positive feedback | No action needed |
 
 ### Comment Format

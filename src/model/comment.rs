@@ -54,6 +54,7 @@ pub enum CommentType {
     Suggestion,
     Issue,
     Praise,
+    Question,
 }
 
 impl CommentType {
@@ -63,6 +64,7 @@ impl CommentType {
             CommentType::Suggestion => "SUGGESTION",
             CommentType::Issue => "ISSUE",
             CommentType::Praise => "PRAISE",
+            CommentType::Question => "QUESTION",
         }
     }
 }
@@ -221,6 +223,16 @@ mod tests {
 
     mod comment_tests {
         use super::*;
+
+        #[test]
+        fn comment_type_question_serializes_and_deserializes() {
+            let json = serde_json::to_string(&CommentType::Question).unwrap();
+            assert_eq!(json, "\"question\"");
+
+            let parsed: CommentType = serde_json::from_str("\"question\"").unwrap();
+            assert_eq!(parsed, CommentType::Question);
+            assert_eq!(parsed.as_str(), "QUESTION");
+        }
 
         #[test]
         fn new_creates_comment_without_line_range() {

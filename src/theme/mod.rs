@@ -53,6 +53,7 @@ pub struct Theme {
     pub comment_suggestion: Color,
     pub comment_issue: Color,
     pub comment_praise: Color,
+    pub comment_question: Color,
 
     // UI element colors
     pub border_focused: Color,
@@ -127,6 +128,7 @@ impl Theme {
             comment_suggestion: Color::Rgb(90, 220, 240),
             comment_issue: Color::Rgb(240, 90, 90),
             comment_praise: Color::Rgb(80, 220, 120),
+            comment_question: Color::Rgb(255, 210, 90),
 
             // UI element colors
             border_focused: Color::Rgb(90, 200, 255),
@@ -196,6 +198,7 @@ impl Theme {
             comment_suggestion: Color::Rgb(0, 100, 120),
             comment_issue: Color::Rgb(160, 0, 0),
             comment_praise: Color::Rgb(0, 100, 0),
+            comment_question: Color::Rgb(140, 80, 0),
 
             // UI element colors
             border_focused: Color::Rgb(0, 60, 140),
@@ -359,6 +362,7 @@ impl Theme {
             comment_suggestion: Color::Rgb(76, 191, 153),
             comment_issue: Color::Rgb(240, 113, 120),
             comment_praise: Color::Rgb(134, 179, 0),
+            comment_question: Color::Rgb(231, 197, 71),
 
             // UI element colors
             border_focused: Color::Rgb(54, 163, 217),
@@ -426,6 +430,7 @@ impl Theme {
             comment_suggestion: Color::Rgb(86, 182, 194),
             comment_issue: Color::Rgb(224, 108, 117),
             comment_praise: Color::Rgb(152, 195, 121),
+            comment_question: Color::Rgb(229, 192, 123),
 
             // UI element colors
             border_focused: Color::Rgb(97, 175, 239),
@@ -614,6 +619,7 @@ fn catppuccin_theme(flavor: CatppuccinFlavor, syntect_theme: EmbeddedThemeName) 
         comment_suggestion: flavor.teal,
         comment_issue: flavor.red,
         comment_praise: flavor.green,
+        comment_question: flavor.yellow,
 
         // UI element colors
         border_focused: flavor.blue,
@@ -688,6 +694,7 @@ fn gruvbox_theme(flavor: GruvboxFlavor) -> Theme {
         comment_suggestion: flavor.aqua,
         comment_issue: flavor.red,
         comment_praise: flavor.green,
+        comment_question: flavor.yellow,
 
         // UI element colors
         border_focused: flavor.aqua,

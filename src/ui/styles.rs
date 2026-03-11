@@ -116,6 +116,7 @@ pub fn comment_type_style(theme: &Theme, comment_type: crate::model::CommentType
         CommentType::Suggestion => theme.comment_suggestion,
         CommentType::Issue => theme.comment_issue,
         CommentType::Praise => theme.comment_praise,
+        CommentType::Question => theme.comment_question,
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
@@ -127,6 +128,7 @@ pub fn comment_border_style(theme: &Theme, comment_type: crate::model::CommentTy
         CommentType::Suggestion => theme.comment_suggestion,
         CommentType::Issue => theme.comment_issue,
         CommentType::Praise => theme.comment_praise,
+        CommentType::Question => theme.comment_question,
     };
     Style::default().fg(color)
 }

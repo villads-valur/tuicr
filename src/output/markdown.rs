@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::io::Write as IoWrite;
 
 use arboard::Clipboard;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 use crate::app::DiffSource;
 use crate::error::{Result, TuicrError};
@@ -174,7 +174,7 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
 
     let _ = writeln!(
         md,
-        "Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback)"
+        "Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback), QUESTION (clarifications to answer)"
     );
     let _ = writeln!(md);
 
@@ -306,7 +306,7 @@ mod tests {
 
         // then
         assert!(markdown.contains("I reviewed your code and have the following comments"));
-        assert!(markdown.contains("Comment types:"));
+        assert!(markdown.contains("QUESTION (clarifications to answer)"));
         assert!(markdown.contains("[SUGGESTION]"));
         assert!(markdown.contains("`src/main.rs`"));
         assert!(markdown.contains("Consider adding documentation"));
@@ -364,6 +364,29 @@ mod tests {
         assert!(content.contains("I reviewed your code"));
         assert!(content.contains("[SUGGESTION]"));
         assert!(content.contains("[ISSUE]"));
+    }
+
+    #[test]
+    fn should_export_question_comment_type() {
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
+        session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
+
+        if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
+            review.add_file_comment(Comment::new(
+                "Can we simplify this branch?".to_string(),
+                CommentType::Question,
+                None,
+            ));
+        }
+
+        let markdown = generate_markdown(&session, &DiffSource::WorkingTree);
+        assert!(markdown.contains("QUESTION (clarifications to answer)"));
+        assert!(markdown.contains("1. **[QUESTION]** `src/main.rs` - Can we simplify this branch?"));
     }
 
     #[test]

@@ -2105,7 +2105,8 @@ impl App {
             CommentType::Note => CommentType::Suggestion,
             CommentType::Suggestion => CommentType::Issue,
             CommentType::Issue => CommentType::Praise,
-            CommentType::Praise => CommentType::Note,
+            CommentType::Praise => CommentType::Question,
+            CommentType::Question => CommentType::Note,
         };
     }
 
