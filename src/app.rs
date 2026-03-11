@@ -345,14 +345,14 @@ pub struct HelpState {
 
 /// Represents a comment location for deletion
 enum CommentLocation {
-    ReviewComment {
+    Review {
         index: usize,
     },
-    FileComment {
+    File {
         path: std::path::PathBuf,
         index: usize,
     },
-    LineComment {
+    Line {
         path: std::path::PathBuf,
         line: u32,
         side: LineSide,
@@ -1753,17 +1753,15 @@ impl App {
     fn find_comment_at_cursor(&self) -> Option<CommentLocation> {
         let target = self.diff_state.cursor_line;
         match self.line_annotations.get(target) {
-            Some(AnnotatedLine::ReviewComment { comment_idx }) => {
-                Some(CommentLocation::ReviewComment {
-                    index: *comment_idx,
-                })
-            }
+            Some(AnnotatedLine::ReviewComment { comment_idx }) => Some(CommentLocation::Review {
+                index: *comment_idx,
+            }),
             Some(AnnotatedLine::FileComment {
                 file_idx,
                 comment_idx,
             }) => {
                 let path = self.diff_files.get(*file_idx)?.display_path().clone();
-                Some(CommentLocation::FileComment {
+                Some(CommentLocation::File {
                     path,
                     index: *comment_idx,
                 })
@@ -1775,7 +1773,7 @@ impl App {
                 comment_idx,
             }) => {
                 let path = self.diff_files.get(*file_idx)?.display_path().clone();
-                Some(CommentLocation::LineComment {
+                Some(CommentLocation::Line {
                     path,
                     line: *line,
                     side: *side,
@@ -1792,7 +1790,7 @@ impl App {
         let location = self.find_comment_at_cursor();
 
         match location {
-            Some(CommentLocation::ReviewComment { index }) => {
+            Some(CommentLocation::Review { index }) => {
                 if index < self.session.review_comments.len() {
                     self.session.review_comments.remove(index);
                     self.dirty = true;
@@ -1801,7 +1799,7 @@ impl App {
                     return true;
                 }
             }
-            Some(CommentLocation::FileComment { path, index }) => {
+            Some(CommentLocation::File { path, index }) => {
                 if let Some(review) = self.session.get_file_mut(&path) {
                     review.file_comments.remove(index);
                     self.dirty = true;
@@ -1810,7 +1808,7 @@ impl App {
                     return true;
                 }
             }
-            Some(CommentLocation::LineComment {
+            Some(CommentLocation::Line {
                 path,
                 line,
                 side,
@@ -1868,7 +1866,7 @@ impl App {
         let location = self.find_comment_at_cursor();
 
         match location {
-            Some(CommentLocation::ReviewComment { index }) => {
+            Some(CommentLocation::Review { index }) => {
                 if let Some(comment) = self.session.review_comments.get(index) {
                     self.input_mode = InputMode::Comment;
                     self.comment_buffer = comment.content.clone();
@@ -1881,7 +1879,7 @@ impl App {
                     return true;
                 }
             }
-            Some(CommentLocation::FileComment { path, index }) => {
+            Some(CommentLocation::File { path, index }) => {
                 if let Some(review) = self.session.files.get(&path)
                     && let Some(comment) = review.file_comments.get(index)
                 {
@@ -1896,7 +1894,7 @@ impl App {
                     return true;
                 }
             }
-            Some(CommentLocation::LineComment {
+            Some(CommentLocation::Line {
                 path,
                 line,
                 side,
