@@ -257,7 +257,7 @@ fn main() -> anyhow::Result<()> {
                         // Otherwise fall through to normal handling
                     }
 
-                    // Handle pending ; command for ;e toggle file list, ;h/;l/;k/;j panel focus
+                    // Handle pending ; command for panel focus, file list toggle, and review comments
                     if pending_semicolon {
                         pending_semicolon = false;
                         match key.code {
@@ -281,6 +281,10 @@ fn main() -> anyhow::Result<()> {
                             }
                             crossterm::event::KeyCode::Char('j') => {
                                 app.focused_panel = app::FocusedPanel::Diff;
+                                continue;
+                            }
+                            crossterm::event::KeyCode::Char('c') => {
+                                app.enter_review_comment_mode();
                                 continue;
                             }
                             _ => {}

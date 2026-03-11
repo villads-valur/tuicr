@@ -226,6 +226,13 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(
+                "  ;c        ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Add review comment"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  i         ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),

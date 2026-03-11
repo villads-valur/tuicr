@@ -43,6 +43,10 @@ pub struct GapId {
 /// Describes what a rendered line represents - built once and used for O(1) cursor queries
 #[derive(Debug, Clone)]
 pub enum AnnotatedLine {
+    /// Review comments section header line
+    ReviewCommentsHeader,
+    /// A review-level comment line (part of a multi-line comment box)
+    ReviewComment { comment_idx: usize },
     /// File header line
     FileHeader { file_idx: usize },
     /// A file-level comment line (part of a multi-line comment box)
@@ -214,6 +218,7 @@ pub struct App {
     pub comment_buffer: String,
     pub comment_cursor: usize,
     pub comment_type: CommentType,
+    pub comment_is_review_level: bool,
     pub comment_is_file_level: bool,
     pub comment_line: Option<(u32, LineSide)>,
     pub editing_comment_id: Option<String>,
@@ -346,11 +351,14 @@ pub struct HelpState {
 
 /// Represents a comment location for deletion
 enum CommentLocation {
-    FileComment {
+    Review {
+        index: usize,
+    },
+    File {
         path: std::path::PathBuf,
         index: usize,
     },
-    LineComment {
+    Line {
         path: std::path::PathBuf,
         line: u32,
         side: LineSide,
@@ -533,6 +541,7 @@ impl App {
             comment_buffer: String::new(),
             comment_cursor: 0,
             comment_type: CommentType::Note,
+            comment_is_review_level: false,
             comment_is_file_level: true,
             comment_line: None,
             editing_comment_id: None,
@@ -1193,6 +1202,11 @@ impl App {
 
     fn line_text_for_search(&self, line_idx: usize) -> Option<String> {
         match self.line_annotations.get(line_idx)? {
+            AnnotatedLine::ReviewCommentsHeader => Some("Review comments".to_string()),
+            AnnotatedLine::ReviewComment { comment_idx } => {
+                let comment = self.session.review_comments.get(*comment_idx)?;
+                Some(comment.content.clone())
+            }
             AnnotatedLine::FileHeader { file_idx } => {
                 let file = self.diff_files.get(*file_idx)?;
                 Some(format!(
@@ -1409,7 +1423,7 @@ impl App {
 
     pub fn next_hunk(&mut self) {
         // Find the next hunk header position after current cursor
-        let mut cumulative = 0;
+        let mut cumulative = self.review_comments_render_height();
         for file in &self.diff_files {
             let path = file.display_path();
 
@@ -1448,7 +1462,7 @@ impl App {
     pub fn prev_hunk(&mut self) {
         // Find the previous hunk header position before current cursor
         let mut hunk_positions: Vec<usize> = Vec::new();
-        let mut cumulative = 0;
+        let mut cumulative = self.review_comments_render_height();
 
         for file in &self.diff_files {
             let path = file.display_path();
@@ -1493,7 +1507,7 @@ impl App {
     }
 
     fn calculate_file_scroll_offset(&self, file_idx: usize) -> usize {
-        let mut offset = 0;
+        let mut offset = self.review_comments_render_height();
         for (i, file) in self.diff_files.iter().enumerate() {
             if i == file_idx {
                 break;
@@ -1501,6 +1515,21 @@ impl App {
             offset += self.file_render_height(i, file);
         }
         offset
+    }
+
+    fn review_comments_render_height(&self) -> usize {
+        let mut height = 1; // Header line
+        for comment in &self.session.review_comments {
+            height += Self::comment_display_lines(comment);
+        }
+        if self.input_mode == InputMode::Comment
+            && self.comment_is_review_level
+            && self.editing_comment_id.is_none()
+        {
+            // Header + one content line + footer
+            height += 3;
+        }
+        height
     }
 
     fn file_render_height(&self, file_idx: usize, file: &DiffFile) -> usize {
@@ -1695,7 +1724,14 @@ impl App {
     }
 
     fn update_current_file_from_cursor(&mut self) {
-        let mut cumulative = 0;
+        let mut cumulative = self.review_comments_render_height();
+        if self.diff_state.cursor_line < cumulative {
+            if !self.diff_files.is_empty() {
+                self.diff_state.current_file_idx = 0;
+                self.file_list_state.select(0);
+            }
+            return;
+        }
         for (i, file) in self.diff_files.iter().enumerate() {
             let height = self.file_render_height(i, file);
             if cumulative + height > self.diff_state.cursor_line {
@@ -1712,11 +1748,13 @@ impl App {
     }
 
     pub fn total_lines(&self) -> usize {
-        self.diff_files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| self.file_render_height(i, f))
-            .sum()
+        self.review_comments_render_height()
+            + self
+                .diff_files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| self.file_render_height(i, f))
+                .sum::<usize>()
     }
 
     /// Calculate the maximum scroll offset.
@@ -1772,12 +1810,15 @@ impl App {
     fn find_comment_at_cursor(&self) -> Option<CommentLocation> {
         let target = self.diff_state.cursor_line;
         match self.line_annotations.get(target) {
+            Some(AnnotatedLine::ReviewComment { comment_idx }) => Some(CommentLocation::Review {
+                index: *comment_idx,
+            }),
             Some(AnnotatedLine::FileComment {
                 file_idx,
                 comment_idx,
             }) => {
                 let path = self.diff_files.get(*file_idx)?.display_path().clone();
-                Some(CommentLocation::FileComment {
+                Some(CommentLocation::File {
                     path,
                     index: *comment_idx,
                 })
@@ -1789,7 +1830,7 @@ impl App {
                 comment_idx,
             }) => {
                 let path = self.diff_files.get(*file_idx)?.display_path().clone();
-                Some(CommentLocation::LineComment {
+                Some(CommentLocation::Line {
                     path,
                     line: *line,
                     side: *side,
@@ -1806,7 +1847,16 @@ impl App {
         let location = self.find_comment_at_cursor();
 
         match location {
-            Some(CommentLocation::FileComment { path, index }) => {
+            Some(CommentLocation::Review { index }) => {
+                if index < self.session.review_comments.len() {
+                    self.session.review_comments.remove(index);
+                    self.dirty = true;
+                    self.set_message("Review comment deleted");
+                    self.rebuild_annotations();
+                    return true;
+                }
+            }
+            Some(CommentLocation::File { path, index }) => {
                 if let Some(review) = self.session.get_file_mut(&path) {
                     review.file_comments.remove(index);
                     self.dirty = true;
@@ -1815,7 +1865,7 @@ impl App {
                     return true;
                 }
             }
-            Some(CommentLocation::LineComment {
+            Some(CommentLocation::Line {
                 path,
                 line,
                 side,
@@ -1873,7 +1923,20 @@ impl App {
         let location = self.find_comment_at_cursor();
 
         match location {
-            Some(CommentLocation::FileComment { path, index }) => {
+            Some(CommentLocation::Review { index }) => {
+                if let Some(comment) = self.session.review_comments.get(index) {
+                    self.input_mode = InputMode::Comment;
+                    self.comment_buffer = comment.content.clone();
+                    self.comment_cursor = self.comment_buffer.len();
+                    self.comment_type = comment.comment_type;
+                    self.comment_is_review_level = true;
+                    self.comment_is_file_level = false;
+                    self.comment_line = None;
+                    self.editing_comment_id = Some(comment.id.clone());
+                    return true;
+                }
+            }
+            Some(CommentLocation::File { path, index }) => {
                 if let Some(review) = self.session.files.get(&path)
                     && let Some(comment) = review.file_comments.get(index)
                 {
@@ -1881,13 +1944,14 @@ impl App {
                     self.comment_buffer = comment.content.clone();
                     self.comment_cursor = self.comment_buffer.len();
                     self.comment_type = comment.comment_type;
+                    self.comment_is_review_level = false;
                     self.comment_is_file_level = true;
                     self.comment_line = None;
                     self.editing_comment_id = Some(comment.id.clone());
                     return true;
                 }
             }
-            Some(CommentLocation::LineComment {
+            Some(CommentLocation::Line {
                 path,
                 line,
                 side,
@@ -1906,6 +1970,7 @@ impl App {
                                 self.comment_buffer = comment.content.clone();
                                 self.comment_cursor = self.comment_buffer.len();
                                 self.comment_type = comment.comment_type;
+                                self.comment_is_review_level = false;
                                 self.comment_is_file_level = false;
                                 self.comment_line = Some((line, side));
                                 self.editing_comment_id = Some(comment.id.clone());
@@ -1947,14 +2012,28 @@ impl App {
         self.comment_buffer.clear();
         self.comment_cursor = 0;
         self.comment_type = CommentType::Note;
+        self.comment_is_review_level = false;
         self.comment_is_file_level = file_level;
         self.comment_line = line;
+    }
+
+    pub fn enter_review_comment_mode(&mut self) {
+        self.input_mode = InputMode::Comment;
+        self.comment_buffer.clear();
+        self.comment_cursor = 0;
+        self.comment_type = CommentType::Note;
+        self.comment_is_review_level = true;
+        self.comment_is_file_level = false;
+        self.comment_line = None;
+        self.comment_line_range = None;
+        self.editing_comment_id = None;
     }
 
     pub fn exit_comment_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.comment_buffer.clear();
         self.comment_cursor = 0;
+        self.comment_is_review_level = false;
         self.editing_comment_id = None;
         self.comment_line_range = None;
     }
@@ -2008,6 +2087,7 @@ impl App {
             self.comment_buffer.clear();
             self.comment_cursor = 0;
             self.comment_type = CommentType::Note;
+            self.comment_is_review_level = false;
             self.comment_is_file_level = false;
             self.visual_anchor = None;
         } else {
@@ -2024,15 +2104,22 @@ impl App {
 
         let content = self.comment_buffer.trim().to_string();
 
-        if let Some(path) = self.current_file_path().cloned()
-            && let Some(review) = self.session.get_file_mut(&path)
-        {
-            let message: String;
+        let mut message = "Error: Could not save comment".to_string();
 
-            // Check if we're editing an existing comment
-            if let Some(editing_id) = &self.editing_comment_id {
-                // Update existing comment
-                // Search in file comments
+        // Check if we're editing an existing comment
+        if let Some(editing_id) = &self.editing_comment_id {
+            if let Some(comment) = self
+                .session
+                .review_comments
+                .iter_mut()
+                .find(|c| &c.id == editing_id)
+            {
+                comment.content = content.clone();
+                comment.comment_type = self.comment_type;
+                message = "Review comment updated".to_string();
+            } else if let Some(path) = self.current_file_path().cloned()
+                && let Some(review) = self.session.get_file_mut(&path)
+            {
                 if let Some(comment) = review
                     .file_comments
                     .iter_mut()
@@ -2063,39 +2150,47 @@ impl App {
                         message = "Error: Comment to edit not found".to_string();
                     }
                 }
-            } else {
-                // Create new comment
-                if self.comment_is_file_level {
-                    let comment = Comment::new(content, self.comment_type, None);
-                    review.add_file_comment(comment);
-                    message = "File comment added".to_string();
-                } else if let Some((range, side)) = self.comment_line_range {
-                    // Range comment from visual selection
-                    let comment =
-                        Comment::new_with_range(content, self.comment_type, Some(side), range);
-                    // Store by end line of the range
-                    review.add_line_comment(range.end, comment);
-                    if range.is_single() {
-                        message = format!("Comment added to line {}", range.end);
-                    } else {
-                        message = format!("Comment added to lines {}-{}", range.start, range.end);
-                    }
-                } else if let Some((line, side)) = self.comment_line {
-                    let comment = Comment::new(content, self.comment_type, Some(side));
-                    review.add_line_comment(line, comment);
-                    message = format!("Comment added to line {line}");
-                } else {
-                    // Fallback to file comment if no line specified
-                    let comment = Comment::new(content, self.comment_type, None);
-                    review.add_file_comment(comment);
-                    message = "File comment added".to_string();
-                }
             }
-
-            self.dirty = true;
-            self.set_message(message);
-            self.rebuild_annotations();
+        } else if self.comment_is_review_level {
+            let comment = Comment::new(content, self.comment_type, None);
+            self.session.review_comments.push(comment);
+            message = "Review comment added".to_string();
+        } else if let Some(path) = self.current_file_path().cloned()
+            && let Some(review) = self.session.get_file_mut(&path)
+        {
+            // Create new comment
+            if self.comment_is_file_level {
+                let comment = Comment::new(content, self.comment_type, None);
+                review.add_file_comment(comment);
+                message = "File comment added".to_string();
+            } else if let Some((range, side)) = self.comment_line_range {
+                // Range comment from visual selection
+                let comment =
+                    Comment::new_with_range(content, self.comment_type, Some(side), range);
+                // Store by end line of the range
+                review.add_line_comment(range.end, comment);
+                if range.is_single() {
+                    message = format!("Comment added to line {}", range.end);
+                } else {
+                    message = format!("Comment added to lines {}-{}", range.start, range.end);
+                }
+            } else if let Some((line, side)) = self.comment_line {
+                let comment = Comment::new(content, self.comment_type, Some(side));
+                review.add_line_comment(line, comment);
+                message = format!("Comment added to line {line}");
+            } else {
+                // Fallback to file comment if no line specified
+                let comment = Comment::new(content, self.comment_type, None);
+                review.add_file_comment(comment);
+                message = "File comment added".to_string();
+            }
         }
+
+        if !message.starts_with("Error:") {
+            self.dirty = true;
+        }
+        self.set_message(message);
+        self.rebuild_annotations();
 
         self.exit_comment_mode();
     }
@@ -2960,6 +3055,16 @@ impl App {
     /// - Diff view mode changes
     pub fn rebuild_annotations(&mut self) {
         self.line_annotations.clear();
+
+        self.line_annotations
+            .push(AnnotatedLine::ReviewCommentsHeader);
+        for (comment_idx, comment) in self.session.review_comments.iter().enumerate() {
+            let comment_lines = Self::comment_display_lines(comment);
+            for _ in 0..comment_lines {
+                self.line_annotations
+                    .push(AnnotatedLine::ReviewComment { comment_idx });
+            }
+        }
 
         for (file_idx, file) in self.diff_files.iter().enumerate() {
             let path = file.display_path();
