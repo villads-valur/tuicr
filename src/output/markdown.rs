@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::io::Write as IoWrite;
 
 use arboard::Clipboard;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::app::DiffSource;
 use crate::error::{Result, TuicrError};
@@ -115,6 +115,18 @@ fn write_osc52<W: IoWrite>(writer: &mut W, text: &str) -> Result<()> {
     Ok(())
 }
 
+fn review_scope_label(diff_source: &DiffSource) -> String {
+    let scope = match diff_source {
+        DiffSource::WorkingTree => "working tree changes".to_string(),
+        DiffSource::CommitRange(_) => "selected commit range".to_string(),
+        DiffSource::WorkingTreeAndCommits(_) => {
+            "selected commit range + working tree changes".to_string()
+        }
+    };
+
+    format!("Review Comment (scope: {scope})")
+}
+
 fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> String {
     let mut md = String::new();
 
@@ -166,10 +178,11 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
 
     // Collect all comments into a flat list
     let mut all_comments: Vec<CommentEntry> = Vec::new();
+    let review_comment_location = review_scope_label(diff_source);
 
     for comment in &session.review_comments {
         all_comments.push((
-            "(review)".to_string(),
+            review_comment_location.clone(),
             None,
             None,
             comment.comment_type.as_str(),
@@ -331,7 +344,27 @@ mod tests {
 
         let markdown = generate_markdown(&session, &DiffSource::WorkingTree);
 
-        assert!(markdown.contains("`(review)` - Please split this into smaller commits"));
+        assert!(markdown
+            .contains("`Review Comment (scope: working tree changes)` - Please split this into smaller commits"));
+    }
+
+    #[test]
+    fn should_include_commit_range_scope_for_review_comments() {
+        let mut session = create_test_session();
+        session.review_comments.push(Comment::new(
+            "High-level concern across commits".to_string(),
+            CommentType::Issue,
+            None,
+        ));
+
+        let markdown = generate_markdown(
+            &session,
+            &DiffSource::CommitRange(vec!["abc1234567890".to_string()]),
+        );
+
+        assert!(markdown.contains(
+            "`Review Comment (scope: selected commit range)` - High-level concern across commits"
+        ));
     }
 
     #[test]

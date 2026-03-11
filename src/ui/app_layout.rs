@@ -578,7 +578,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut comment_cursor_logical_line: Option<usize> = None;
     let mut comment_cursor_column: u16 = 0;
 
-    let is_review_comment_mode = app.input_mode == InputMode::Comment && app.comment_is_review_level;
+    let is_review_comment_mode =
+        app.input_mode == InputMode::Comment && app.comment_is_review_level;
 
     let general_indicator = cursor_indicator_spaced(line_idx, current_line_idx);
     lines.push(Line::from(vec![
@@ -586,7 +587,10 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             general_indicator,
             styles::current_line_indicator_style(&app.theme),
         ),
-        Span::styled("═══ Review Comments ", styles::file_header_style(&app.theme)),
+        Span::styled(
+            "═══ Review Comments ",
+            styles::file_header_style(&app.theme),
+        ),
         Span::styled("═".repeat(40), styles::file_header_style(&app.theme)),
     ]));
     line_idx += 1;
@@ -618,8 +622,12 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 line_idx += 1;
             }
         } else {
-            let comment_lines =
-                comment_panel::format_comment_lines(&app.theme, comment.comment_type, &comment.content, None);
+            let comment_lines = comment_panel::format_comment_lines(
+                &app.theme,
+                comment.comment_type,
+                &comment.content,
+                None,
+            );
             for mut comment_line in comment_lines {
                 let indicator = cursor_indicator(line_idx, current_line_idx);
                 comment_line.spans.insert(
@@ -1407,8 +1415,9 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let content_width = available_width / 2;
 
     // Determine if we're in line comment mode (not file-level)
-    let comment_input_mode =
-        app.input_mode == InputMode::Comment && !app.comment_is_file_level && !app.comment_is_review_level;
+    let comment_input_mode = app.input_mode == InputMode::Comment
+        && !app.comment_is_file_level
+        && !app.comment_is_review_level;
 
     let ctx = SideBySideContext {
         theme: &app.theme,
@@ -1432,7 +1441,8 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut comment_cursor_logical_line: Option<usize> = None;
     let mut comment_cursor_column: u16 = 0;
 
-    let is_review_comment_mode = app.input_mode == InputMode::Comment && app.comment_is_review_level;
+    let is_review_comment_mode =
+        app.input_mode == InputMode::Comment && app.comment_is_review_level;
 
     let general_indicator = cursor_indicator_spaced(line_idx, ctx.current_line_idx);
     lines.push(Line::from(vec![
@@ -1440,7 +1450,10 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             general_indicator,
             styles::current_line_indicator_style(&app.theme),
         ),
-        Span::styled("═══ Review Comments ", styles::file_header_style(&app.theme)),
+        Span::styled(
+            "═══ Review Comments ",
+            styles::file_header_style(&app.theme),
+        ),
         Span::styled("═".repeat(40), styles::file_header_style(&app.theme)),
     ]));
     line_idx += 1;
@@ -1472,8 +1485,12 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 line_idx += 1;
             }
         } else {
-            let comment_lines =
-                comment_panel::format_comment_lines(&app.theme, comment.comment_type, &comment.content, None);
+            let comment_lines = comment_panel::format_comment_lines(
+                &app.theme,
+                comment.comment_type,
+                &comment.content,
+                None,
+            );
             for mut comment_line in comment_lines {
                 let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
                 comment_line.spans.insert(

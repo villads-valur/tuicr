@@ -345,7 +345,9 @@ pub struct HelpState {
 
 /// Represents a comment location for deletion
 enum CommentLocation {
-    ReviewComment { index: usize },
+    ReviewComment {
+        index: usize,
+    },
     FileComment {
         path: std::path::PathBuf,
         index: usize,
@@ -1692,10 +1694,10 @@ impl App {
         self.review_comments_render_height()
             + self
                 .diff_files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| self.file_render_height(i, f))
-            .sum::<usize>()
+                .iter()
+                .enumerate()
+                .map(|(i, f)| self.file_render_height(i, f))
+                .sum::<usize>()
     }
 
     /// Calculate the maximum scroll offset.
@@ -2108,7 +2110,8 @@ impl App {
                 message = "File comment added".to_string();
             } else if let Some((range, side)) = self.comment_line_range {
                 // Range comment from visual selection
-                let comment = Comment::new_with_range(content, self.comment_type, Some(side), range);
+                let comment =
+                    Comment::new_with_range(content, self.comment_type, Some(side), range);
                 // Store by end line of the range
                 review.add_line_comment(range.end, comment);
                 if range.is_single() {
@@ -2950,7 +2953,8 @@ impl App {
     pub fn rebuild_annotations(&mut self) {
         self.line_annotations.clear();
 
-        self.line_annotations.push(AnnotatedLine::ReviewCommentsHeader);
+        self.line_annotations
+            .push(AnnotatedLine::ReviewCommentsHeader);
         for (comment_idx, comment) in self.session.review_comments.iter().enumerate() {
             let comment_lines = Self::comment_display_lines(comment);
             for _ in 0..comment_lines {

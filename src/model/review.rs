@@ -63,7 +63,7 @@ pub struct ReviewSession {
     pub commit_range: Option<Vec<String>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    #[serde(default, alias = "general_comments")]
+    #[serde(default)]
     pub review_comments: Vec<Comment>,
     pub files: HashMap<PathBuf, FileReview>,
     pub session_notes: Option<String>,
