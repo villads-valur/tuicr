@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::io::Write as IoWrite;
 
 use arboard::Clipboard;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 use crate::app::DiffSource;
 use crate::error::{Result, TuicrError};
@@ -121,6 +121,9 @@ fn review_scope_label(diff_source: &DiffSource) -> String {
         DiffSource::CommitRange(_) => "selected commit range".to_string(),
         DiffSource::WorkingTreeAndCommits(_) => {
             "selected commit range + working tree changes".to_string()
+        }
+        DiffSource::PullRequest { base_ref, .. } => {
+            format!("PR diff {base_ref}..HEAD")
         }
     };
 
