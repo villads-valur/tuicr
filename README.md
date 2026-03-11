@@ -8,6 +8,19 @@ Review AI-generated diffs like a GitHub pull request, right from your terminal.
 
 ![demo](./public/tuicr-demo.gif)
 
+## This Fork
+
+I maintain this as a fork of `tuicr` to ship a few workflow tweaks that fit how I use it day to day.
+
+None of this would be possible without the original project by [agavra](https://github.com/agavra). Huge credit for building the foundation this fork stands on.
+
+Changes in this fork include:
+- Review-level comments across the full review scope
+- PR diff review mode (`--pr`, `--base`, and `:pr`)
+- Theme and appearance improvements
+- Better exported markdown for review scope context
+- Small CLI and PR base detection fixes
+
 ## Why I built this
 
 I use Claude a lot but there's no middle ground between "review every change"
