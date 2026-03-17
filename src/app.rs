@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use ratatui::style::Color;
 
+use crate::config::CommentTypeConfig;
 use crate::error::{Result, TuicrError};
 use crate::model::{
     Comment, CommentType, DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin, LineRange,
@@ -218,6 +220,7 @@ pub struct App {
     pub comment_buffer: String,
     pub comment_cursor: usize,
     pub comment_type: CommentType,
+    pub comment_types: Vec<CommentTypeDefinition>,
     pub comment_is_review_level: bool,
     pub comment_is_file_level: bool,
     pub comment_line: Option<(u32, LineSide)>,
@@ -281,6 +284,14 @@ pub struct App {
     pub range_diff_files: Option<Vec<DiffFile>>,
     /// Saved inline selection range when entering full commit select mode via :commits
     pub saved_inline_selection: Option<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentTypeDefinition {
+    pub id: String,
+    pub label: String,
+    pub definition: Option<String>,
+    pub color: Option<Color>,
 }
 
 #[derive(Default)]
@@ -369,6 +380,7 @@ enum CommentLocation {
 impl App {
     pub fn new(
         theme: Theme,
+        comment_type_configs: Option<Vec<CommentTypeConfig>>,
         output_to_stdout: bool,
         revisions: Option<&str>,
         pr_mode: bool,
@@ -377,7 +389,6 @@ impl App {
         let vcs = detect_vcs()?;
         let vcs_info = vcs.info().clone();
         let highlighter = theme.syntax_highlighter();
-
         if pr_mode {
             let pr_diff = vcs.get_pull_request_diff(pr_base_ref, highlighter)?;
             let mut session = ReviewSession::new(
@@ -395,6 +406,7 @@ impl App {
                 vcs,
                 vcs_info,
                 theme,
+                comment_type_configs,
                 output_to_stdout,
                 pr_diff.files,
                 session,
@@ -408,7 +420,6 @@ impl App {
                 Vec::new(),
             );
         }
-
         // Determine the diff source, files, and session based on input.
         // Three paths: CLI revisions, working tree changes, or commit selection fallback.
         if let Some(revisions) = revisions {
@@ -430,6 +441,7 @@ impl App {
                 vcs,
                 vcs_info,
                 theme,
+                comment_type_configs.clone(),
                 output_to_stdout,
                 diff_files,
                 session,
@@ -483,6 +495,7 @@ impl App {
                 vcs,
                 vcs_info,
                 theme,
+                comment_type_configs,
                 output_to_stdout,
                 working_tree_diff.unwrap_or_default(),
                 session,
@@ -503,6 +516,7 @@ impl App {
         vcs: Box<dyn VcsBackend>,
         vcs_info: VcsInfo,
         theme: Theme,
+        comment_type_configs: Option<Vec<CommentTypeConfig>>,
         output_to_stdout: bool,
         diff_files: Vec<DiffFile>,
         mut session: ReviewSession,
@@ -522,6 +536,9 @@ impl App {
             commit_list.len()
         };
 
+        let comment_types = Self::resolve_comment_types(&theme, comment_type_configs);
+        let default_comment_type = Self::first_comment_type(&comment_types);
+
         let mut app = Self {
             theme,
             vcs,
@@ -540,7 +557,8 @@ impl App {
             last_search_pattern: None,
             comment_buffer: String::new(),
             comment_cursor: 0,
-            comment_type: CommentType::Note,
+            comment_type: default_comment_type,
+            comment_types,
             comment_is_review_level: false,
             comment_is_file_level: true,
             comment_line: None,
@@ -583,6 +601,141 @@ impl App {
         app.expand_all_dirs();
         app.rebuild_annotations();
         Ok(app)
+    }
+
+    fn resolve_comment_types(
+        theme: &Theme,
+        comment_type_configs: Option<Vec<CommentTypeConfig>>,
+    ) -> Vec<CommentTypeDefinition> {
+        let defaults = vec![
+            CommentTypeDefinition {
+                id: "note".to_string(),
+                label: "note".to_string(),
+                definition: Some("observations".to_string()),
+                color: Some(theme.comment_note),
+            },
+            CommentTypeDefinition {
+                id: "suggestion".to_string(),
+                label: "suggestion".to_string(),
+                definition: Some("improvements".to_string()),
+                color: Some(theme.comment_suggestion),
+            },
+            CommentTypeDefinition {
+                id: "issue".to_string(),
+                label: "issue".to_string(),
+                definition: Some("problems to fix".to_string()),
+                color: Some(theme.comment_issue),
+            },
+            CommentTypeDefinition {
+                id: "praise".to_string(),
+                label: "praise".to_string(),
+                definition: Some("positive feedback".to_string()),
+                color: Some(theme.comment_praise),
+            },
+        ];
+
+        let Some(configs) = comment_type_configs else {
+            return defaults;
+        };
+
+        let mut resolved = Vec::new();
+        for config in configs {
+            let id = config.id;
+            let label = config.label.unwrap_or_else(|| id.clone());
+            let definition = config.definition;
+            let color = config.color.as_deref().and_then(Self::parse_config_color);
+            resolved.push(CommentTypeDefinition {
+                id,
+                label,
+                definition,
+                color,
+            });
+        }
+
+        if resolved.is_empty() {
+            defaults
+        } else {
+            resolved
+        }
+    }
+
+    fn first_comment_type(comment_types: &[CommentTypeDefinition]) -> CommentType {
+        comment_types
+            .first()
+            .map(|comment_type| CommentType::from_id(&comment_type.id))
+            .unwrap_or_default()
+    }
+
+    fn default_comment_type(&self) -> CommentType {
+        Self::first_comment_type(&self.comment_types)
+    }
+
+    fn parse_config_color(value: &str) -> Option<Color> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+
+        if let Some(hex) = normalized.strip_prefix('#')
+            && hex.len() == 6
+            && let Ok(rgb) = u32::from_str_radix(hex, 16)
+        {
+            let r = ((rgb >> 16) & 0xff) as u8;
+            let g = ((rgb >> 8) & 0xff) as u8;
+            let b = (rgb & 0xff) as u8;
+            return Some(Color::Rgb(r, g, b));
+        }
+
+        match normalized.as_str() {
+            "black" => Some(Color::Black),
+            "red" => Some(Color::Red),
+            "green" => Some(Color::Green),
+            "yellow" => Some(Color::Yellow),
+            "blue" => Some(Color::Blue),
+            "magenta" => Some(Color::Magenta),
+            "cyan" => Some(Color::Cyan),
+            "gray" | "grey" => Some(Color::Gray),
+            "darkgray" | "dark_gray" | "darkgrey" | "dark_grey" => Some(Color::DarkGray),
+            "lightred" | "light_red" => Some(Color::LightRed),
+            "lightgreen" | "light_green" => Some(Color::LightGreen),
+            "lightyellow" | "light_yellow" => Some(Color::LightYellow),
+            "lightblue" | "light_blue" => Some(Color::LightBlue),
+            "lightmagenta" | "light_magenta" => Some(Color::LightMagenta),
+            "lightcyan" | "light_cyan" => Some(Color::LightCyan),
+            "white" => Some(Color::White),
+            _ => None,
+        }
+    }
+
+    pub fn comment_type_label(&self, comment_type: &CommentType) -> String {
+        if let Some(definition) = self
+            .comment_types
+            .iter()
+            .find(|definition| definition.id == comment_type.id())
+        {
+            return definition.label.to_ascii_uppercase();
+        }
+
+        comment_type.as_str()
+    }
+
+    pub fn comment_type_color(&self, comment_type: &CommentType) -> Color {
+        if let Some(definition) = self
+            .comment_types
+            .iter()
+            .find(|definition| definition.id == comment_type.id())
+            && let Some(color) = definition.color
+        {
+            return color;
+        }
+
+        match comment_type.id() {
+            "note" => self.theme.comment_note,
+            "suggestion" => self.theme.comment_suggestion,
+            "issue" => self.theme.comment_issue,
+            "praise" => self.theme.comment_praise,
+            _ => self.theme.fg_secondary,
+        }
     }
 
     /// Load or create a session for a commit range (used by revisions and commit selection).
@@ -1928,7 +2081,7 @@ impl App {
                     self.input_mode = InputMode::Comment;
                     self.comment_buffer = comment.content.clone();
                     self.comment_cursor = self.comment_buffer.len();
-                    self.comment_type = comment.comment_type;
+                    self.comment_type = comment.comment_type.clone();
                     self.comment_is_review_level = true;
                     self.comment_is_file_level = false;
                     self.comment_line = None;
@@ -1943,7 +2096,7 @@ impl App {
                     self.input_mode = InputMode::Comment;
                     self.comment_buffer = comment.content.clone();
                     self.comment_cursor = self.comment_buffer.len();
-                    self.comment_type = comment.comment_type;
+                    self.comment_type = comment.comment_type.clone();
                     self.comment_is_review_level = false;
                     self.comment_is_file_level = true;
                     self.comment_line = None;
@@ -1969,7 +2122,7 @@ impl App {
                                 self.input_mode = InputMode::Comment;
                                 self.comment_buffer = comment.content.clone();
                                 self.comment_cursor = self.comment_buffer.len();
-                                self.comment_type = comment.comment_type;
+                                self.comment_type = comment.comment_type.clone();
                                 self.comment_is_review_level = false;
                                 self.comment_is_file_level = false;
                                 self.comment_line = Some((line, side));
@@ -2011,7 +2164,7 @@ impl App {
         self.input_mode = InputMode::Comment;
         self.comment_buffer.clear();
         self.comment_cursor = 0;
-        self.comment_type = CommentType::Note;
+        self.comment_type = self.default_comment_type();
         self.comment_is_review_level = false;
         self.comment_is_file_level = file_level;
         self.comment_line = line;
@@ -2021,7 +2174,7 @@ impl App {
         self.input_mode = InputMode::Comment;
         self.comment_buffer.clear();
         self.comment_cursor = 0;
-        self.comment_type = CommentType::Note;
+        self.comment_type = self.default_comment_type();
         self.comment_is_review_level = true;
         self.comment_is_file_level = false;
         self.comment_line = None;
@@ -2086,7 +2239,7 @@ impl App {
             self.input_mode = InputMode::Comment;
             self.comment_buffer.clear();
             self.comment_cursor = 0;
-            self.comment_type = CommentType::Note;
+            self.comment_type = self.default_comment_type();
             self.comment_is_review_level = false;
             self.comment_is_file_level = false;
             self.visual_anchor = None;
@@ -2115,7 +2268,7 @@ impl App {
                 .find(|c| &c.id == editing_id)
             {
                 comment.content = content.clone();
-                comment.comment_type = self.comment_type;
+                comment.comment_type = self.comment_type.clone();
                 message = "Review comment updated".to_string();
             } else if let Some(path) = self.current_file_path().cloned()
                 && let Some(review) = self.session.get_file_mut(&path)
@@ -2126,7 +2279,7 @@ impl App {
                     .find(|c| &c.id == editing_id)
                 {
                     comment.content = content.clone();
-                    comment.comment_type = self.comment_type;
+                    comment.comment_type = self.comment_type.clone();
                     message = "Comment updated".to_string();
                 } else {
                     // If not found in file comments, search in line comments
@@ -2140,7 +2293,7 @@ impl App {
 
                     if let Some(comment) = found_comment {
                         comment.content = content.clone();
-                        comment.comment_type = self.comment_type;
+                        comment.comment_type = self.comment_type.clone();
                         message = if let Some((line, _)) = self.comment_line {
                             format!("Comment on line {line} updated")
                         } else {
@@ -2152,7 +2305,7 @@ impl App {
                 }
             }
         } else if self.comment_is_review_level {
-            let comment = Comment::new(content, self.comment_type, None);
+            let comment = Comment::new(content, self.comment_type.clone(), None);
             self.session.review_comments.push(comment);
             message = "Review comment added".to_string();
         } else if let Some(path) = self.current_file_path().cloned()
@@ -2160,13 +2313,13 @@ impl App {
         {
             // Create new comment
             if self.comment_is_file_level {
-                let comment = Comment::new(content, self.comment_type, None);
+                let comment = Comment::new(content, self.comment_type.clone(), None);
                 review.add_file_comment(comment);
                 message = "File comment added".to_string();
             } else if let Some((range, side)) = self.comment_line_range {
                 // Range comment from visual selection
                 let comment =
-                    Comment::new_with_range(content, self.comment_type, Some(side), range);
+                    Comment::new_with_range(content, self.comment_type.clone(), Some(side), range);
                 // Store by end line of the range
                 review.add_line_comment(range.end, comment);
                 if range.is_single() {
@@ -2175,12 +2328,12 @@ impl App {
                     message = format!("Comment added to lines {}-{}", range.start, range.end);
                 }
             } else if let Some((line, side)) = self.comment_line {
-                let comment = Comment::new(content, self.comment_type, Some(side));
+                let comment = Comment::new(content, self.comment_type.clone(), Some(side));
                 review.add_line_comment(line, comment);
                 message = format!("Comment added to line {line}");
             } else {
                 // Fallback to file comment if no line specified
-                let comment = Comment::new(content, self.comment_type, None);
+                let comment = Comment::new(content, self.comment_type.clone(), None);
                 review.add_file_comment(comment);
                 message = "File comment added".to_string();
             }
@@ -2196,12 +2349,18 @@ impl App {
     }
 
     pub fn cycle_comment_type(&mut self) {
-        self.comment_type = match self.comment_type {
-            CommentType::Note => CommentType::Suggestion,
-            CommentType::Suggestion => CommentType::Issue,
-            CommentType::Issue => CommentType::Praise,
-            CommentType::Praise => CommentType::Note,
-        };
+        if self.comment_types.is_empty() {
+            return;
+        }
+
+        let current_id = self.comment_type.id();
+        let current_index = self
+            .comment_types
+            .iter()
+            .position(|comment_type| comment_type.id == current_id)
+            .unwrap_or(0);
+        let next_index = (current_index + 1) % self.comment_types.len();
+        self.comment_type = CommentType::from_id(&self.comment_types[next_index].id);
     }
 
     pub fn toggle_help(&mut self) {

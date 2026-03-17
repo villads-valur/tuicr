@@ -4,33 +4,32 @@ use std::io::Write as IoWrite;
 use arboard::Clipboard;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-use crate::app::DiffSource;
+use crate::app::{CommentTypeDefinition, DiffSource};
 use crate::error::{Result, TuicrError};
-use crate::model::{LineRange, LineSide, ReviewSession};
+use crate::model::{CommentType, LineRange, LineSide, ReviewSession};
 
 /// (file_path, line_range, side, comment_type, content)
-type CommentEntry<'a> = (
-    String,
-    Option<LineRange>,
-    Option<LineSide>,
-    &'a str,
-    &'a str,
-);
+type CommentEntry<'a> = (String, Option<LineRange>, Option<LineSide>, String, &'a str);
 
 /// Generate markdown content from the review session.
 /// Returns the markdown string or an error if there are no comments.
 pub fn generate_export_content(
     session: &ReviewSession,
     diff_source: &DiffSource,
+    comment_types: &[CommentTypeDefinition],
 ) -> Result<String> {
     if !session.has_comments() {
         return Err(TuicrError::NoComments);
     }
-    Ok(generate_markdown(session, diff_source))
+    Ok(generate_markdown(session, diff_source, comment_types))
 }
 
-pub fn export_to_clipboard(session: &ReviewSession, diff_source: &DiffSource) -> Result<String> {
-    let content = generate_export_content(session, diff_source)?;
+pub fn export_to_clipboard(
+    session: &ReviewSession,
+    diff_source: &DiffSource,
+    comment_types: &[CommentTypeDefinition],
+) -> Result<String> {
+    let content = generate_export_content(session, diff_source, comment_types)?;
 
     // Prefer OSC 52 in tmux/SSH where arboard may silently fail
     if should_prefer_osc52() {
@@ -130,7 +129,11 @@ fn review_scope_label(diff_source: &DiffSource) -> String {
     format!("Review Comment (scope: {scope})")
 }
 
-fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> String {
+fn generate_markdown(
+    session: &ReviewSession,
+    diff_source: &DiffSource,
+    comment_types: &[CommentTypeDefinition],
+) -> String {
     let mut md = String::new();
 
     // Intro for agents
@@ -187,10 +190,26 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
         }
     }
 
-    let _ = writeln!(
-        md,
-        "Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback)"
-    );
+    let legend = if comment_types.is_empty() {
+        "NOTE, SUGGESTION, ISSUE, PRAISE".to_string()
+    } else {
+        comment_types
+            .iter()
+            .map(|comment_type| {
+                let definition = comment_type
+                    .definition
+                    .as_deref()
+                    .unwrap_or(comment_type.id.as_str());
+                format!(
+                    "{} ({})",
+                    comment_type.label.to_ascii_uppercase(),
+                    definition
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let _ = writeln!(md, "Comment types: {legend}");
     let _ = writeln!(md);
 
     // Session notes/summary
@@ -208,7 +227,7 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
             review_comment_location.clone(),
             None,
             None,
-            comment.comment_type.as_str(),
+            export_comment_type_label(&comment.comment_type, comment_types),
             &comment.content,
         ));
     }
@@ -226,7 +245,7 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
                 path_str.clone(),
                 None,
                 None,
-                comment.comment_type.as_str(),
+                export_comment_type_label(&comment.comment_type, comment_types),
                 &comment.content,
             ));
         }
@@ -245,7 +264,7 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
                     path_str.clone(),
                     line_range,
                     comment.side,
-                    comment.comment_type.as_str(),
+                    export_comment_type_label(&comment.comment_type, comment_types),
                     &comment.content,
                 ));
             }
@@ -285,11 +304,55 @@ fn generate_markdown(session: &ReviewSession, diff_source: &DiffSource) -> Strin
     md
 }
 
+fn export_comment_type_label(
+    comment_type: &CommentType,
+    comment_types: &[CommentTypeDefinition],
+) -> String {
+    if let Some(definition) = comment_types
+        .iter()
+        .find(|definition| definition.id == comment_type.id())
+    {
+        return definition.label.to_ascii_uppercase();
+    }
+
+    comment_type.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::CommentTypeDefinition;
     use crate::model::{Comment, CommentType, FileStatus, LineRange, LineSide, SessionDiffSource};
     use std::path::PathBuf;
+
+    fn comment_types() -> Vec<CommentTypeDefinition> {
+        vec![
+            CommentTypeDefinition {
+                id: "note".to_string(),
+                label: "note".to_string(),
+                definition: Some("observations".to_string()),
+                color: None,
+            },
+            CommentTypeDefinition {
+                id: "suggestion".to_string(),
+                label: "suggestion".to_string(),
+                definition: Some("improvements".to_string()),
+                color: None,
+            },
+            CommentTypeDefinition {
+                id: "issue".to_string(),
+                label: "issue".to_string(),
+                definition: Some("problems to fix".to_string()),
+                color: None,
+            },
+            CommentTypeDefinition {
+                id: "praise".to_string(),
+                label: "praise".to_string(),
+                definition: Some("positive feedback".to_string()),
+                color: None,
+            },
+        ]
+    }
 
     fn create_test_session() -> ReviewSession {
         let mut session = ReviewSession::new(
@@ -328,11 +391,12 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("I reviewed your code and have the following comments"));
         assert!(markdown.contains("Comment types:"));
+        assert!(markdown.contains("SUGGESTION (improvements)"));
         assert!(markdown.contains("[SUGGESTION]"));
         assert!(markdown.contains("`src/main.rs`"));
         assert!(markdown.contains("Consider adding documentation"));
@@ -342,13 +406,43 @@ mod tests {
     }
 
     #[test]
+    fn should_use_configured_label_and_definition_in_export() {
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
+        session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
+        if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
+            review.add_file_comment(Comment::new(
+                "Needs clarification".to_string(),
+                CommentType::Note,
+                None,
+            ));
+        }
+
+        let custom_types = vec![CommentTypeDefinition {
+            id: "note".to_string(),
+            label: "question".to_string(),
+            definition: Some("ask for clarification".to_string()),
+            color: None,
+        }];
+
+        let markdown = generate_markdown(&session, &DiffSource::WorkingTree, &custom_types);
+
+        assert!(markdown.contains("Comment types: QUESTION (ask for clarification)"));
+        assert!(markdown.contains("**[QUESTION]**"));
+    }
+
+    #[test]
     fn should_number_comments_sequentially() {
         // given
         let session = create_test_session();
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         // Should have 2 numbered comments
@@ -365,7 +459,7 @@ mod tests {
             None,
         ));
 
-        let markdown = generate_markdown(&session, &DiffSource::WorkingTree);
+        let markdown = generate_markdown(&session, &DiffSource::WorkingTree, &comment_types());
 
         assert!(markdown
             .contains("`Review Comment (scope: working tree changes)` - Please split this into smaller commits"));
@@ -383,6 +477,7 @@ mod tests {
         let markdown = generate_markdown(
             &session,
             &DiffSource::CommitRange(vec!["abc1234567890".to_string()]),
+            &comment_types(),
         );
 
         assert!(markdown.contains(
@@ -402,7 +497,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let result = export_to_clipboard(&session, &diff_source);
+        let result = export_to_clipboard(&session, &diff_source, &comment_types());
 
         // then
         assert!(result.is_err());
@@ -416,7 +511,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let result = generate_export_content(&session, &diff_source);
+        let result = generate_export_content(&session, &diff_source, &comment_types());
 
         // then
         assert!(result.is_ok());
@@ -438,7 +533,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let result = generate_export_content(&session, &diff_source);
+        let result = generate_export_content(&session, &diff_source, &comment_types());
 
         // then
         assert!(result.is_err());
@@ -455,7 +550,7 @@ mod tests {
         ]);
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("Reviewing commits: abc1234, def4567"));
@@ -468,7 +563,7 @@ mod tests {
         let diff_source = DiffSource::CommitRange(vec!["abc1234567890".to_string()]);
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("Reviewing commit: abc1234"));
@@ -529,7 +624,7 @@ mod tests {
         // given - simulate what would be copied during export
         let session = create_test_session();
         let diff_source = DiffSource::WorkingTree;
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
         let mut buffer: Vec<u8> = Vec::new();
 
         // when
@@ -571,7 +666,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("`src/main.rs:42`"));
@@ -604,7 +699,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("`src/main.rs:10-15`"));
@@ -637,7 +732,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("`src/main.rs:~20-~25`"));
@@ -669,7 +764,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("`src/main.rs:~30`"));
@@ -701,7 +796,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source);
+        let markdown = generate_markdown(&session, &diff_source, &comment_types());
 
         // then
         assert!(markdown.contains("`src/main.rs:50`"));
