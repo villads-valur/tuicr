@@ -116,6 +116,7 @@ fn main() -> anyhow::Result<()> {
         cli_args.revisions.as_deref(),
         cli_args.pr_mode,
         cli_args.pr_base_ref.as_deref(),
+        cli_args.working_tree,
     ) {
         Ok(mut app) => {
             app.supports_keyboard_enhancement = keyboard_enhancement_supported;
