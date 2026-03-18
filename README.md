@@ -318,7 +318,7 @@ When you export your review (`:clip` or confirm on `:wq`), `tuicr` copies struct
 ```markdown
 I reviewed your code and have the following comments. Please address them.
 
-Comment types: QUESTION (ask for clarification), SUGGESTION (possible improvements), ISSUE (problems to fix), PRAISE (positive feedback), NITPICK (small optional tweaks)
+Comment types: ISSUE (problems to fix), SUGGESTION (improvements), NOTE (observations), PRAISE (positive feedback)
 
 1. **[SUGGESTION]** `src/auth.rs` - Consider adding unit tests
 2. **[ISSUE]** `src/auth.rs:42` - Magic number should be a named constant
@@ -326,6 +326,7 @@ Comment types: QUESTION (ask for clarification), SUGGESTION (possible improvemen
 ```
 
 Each comment is numbered and self-contained with its file path and line number or range (if applicable).
+If `comment_types` is configured, this legend and the `[TYPE]` tags reflect your configured labels and definitions.
 
 ## Session Persistence
 
