@@ -123,7 +123,7 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 | `--no-update-check` | Skip checking for updates on startup |
 
 By default, `tuicr` starts in commit selection mode.  
-If uncommitted changes exist, the first selectable entry is `Uncommitted changes`.  
+If staged or unstaged changes exist, the first selectable entries are `Staged changes` and/or `Unstaged changes`.  
 When `-r` / `--revisions` is provided, `tuicr` opens that revision range directly.
 On narrow terminals (less than 100 columns), `tuicr` starts with the file list hidden; toggle it with `;e`.
 
@@ -144,6 +144,11 @@ appearance = "system"
 theme_dark = "gruvbox-dark"
 theme_light = "gruvbox-light"
 
+show_file_list = false
+diff_view = "side-by-side"
+wrap = true
+
+
 comment_types = [
   { id = "note", label = "question", definition = "ask for clarification", color = "yellow" },
   { id = "suggestion", definition = "possible improvements" },
@@ -152,6 +157,13 @@ comment_types = [
   { id = "nit", label = "nitpick", definition = "small optional tweaks", color = "#d19a66" }
 ]
 ```
+
+`show_file_list` controls whether the file list panel is visible on startup (default: `true`). Toggle at runtime with `;e`.
+
+`diff_view` sets the default diff layout: `"unified"` (default) or `"side-by-side"`. Toggle at runtime with `:diff`.
+
+`wrap` enables line wrapping in the diff view (default: `false`). Toggle at runtime with `:set wrap!`.
+
 
 `comment_types` replaces the default list and defines Tab cycle order.
 Each entry requires `id` and can optionally set `label`, `definition`, and `color`.
@@ -217,6 +229,7 @@ dist/
 | `Ctrl-d` / `Ctrl-u` | Half page down/up |
 | `Ctrl-f` / `Ctrl-b` | Full page down/up |
 | `g` / `G` | Go to first/last file |
+| `{N}G` | Go to source line N in current file |
 | `{` / `}` | Jump to previous/next file |
 | `[` / `]` | Jump to previous/next hunk |
 | `/` | Search within diff |
@@ -344,6 +357,7 @@ Comment types: QUESTION (ask for clarification), SUGGESTION (possible improvemen
 ```
 
 Each comment is numbered and self-contained with its file path and line number or range (if applicable).
+If `comment_types` is configured, this legend and the `[TYPE]` tags reflect your configured labels and definitions.
 
 ## Session Persistence
 

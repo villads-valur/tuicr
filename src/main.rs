@@ -134,7 +134,7 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Try: tuicr --pr --base origin/main");
             } else {
                 eprintln!(
-                    "\nMake sure you're in a git, jujutsu, or mercurial repository with commits or uncommitted changes."
+                    "\nMake sure you're in a git, jujutsu, or mercurial repository with commits or staged/unstaged changes."
                 );
             }
             std::process::exit(1);
@@ -162,6 +162,20 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(tty_output);
     let mut terminal = Terminal::new(backend)?;
 
+    // Apply config-driven defaults
+    if let Some(ref cfg) = config_outcome.config {
+        if cfg.show_file_list == Some(false) {
+            app.show_file_list = false;
+            app.focused_panel = FocusedPanel::Diff;
+        }
+        if cfg.diff_view.as_deref() == Some("side-by-side") {
+            app.diff_view_mode = app::DiffViewMode::SideBySide;
+        }
+        if cfg.wrap == Some(true) {
+            app.set_diff_wrap(true);
+        }
+    }
+
     // On narrow terminals, start with only the diff panel visible.
     if let Ok((width, _)) = crossterm::terminal::size()
         && width < MIN_WIDTH_FOR_FILE_LIST
@@ -172,6 +186,8 @@ fn main() -> anyhow::Result<()> {
 
     // Track pending z command for zz centering
     let mut pending_z = false;
+    // Track pending Z command for ZZ export+quit / ZQ quit
+    let mut pending_shift_z = false;
     // Track pending d command for dd delete
     let mut pending_d = false;
     // Track pending ; command for ;e toggle file list
@@ -250,6 +266,30 @@ fn main() -> anyhow::Result<()> {
                         // Otherwise fall through to normal handling
                     }
 
+                    // Handle pending Z command for ZZ (export+quit) / ZQ (quit)
+                    if pending_shift_z {
+                        pending_shift_z = false;
+                        match key.code {
+                            crossterm::event::KeyCode::Char('Z') => {
+                                // ZZ: save session, export, and quit (same as :wq)
+                                let _ = persistence::save_session(&app.session);
+                                app.dirty = false;
+                                if app.session.has_comments() {
+                                    handler::handle_export_and_quit(&mut app);
+                                } else {
+                                    app.should_quit = true;
+                                }
+                                continue;
+                            }
+                            crossterm::event::KeyCode::Char('Q') => {
+                                // ZQ: quit without exporting (same as q)
+                                app.should_quit = true;
+                                continue;
+                            }
+                            _ => {} // Fall through to normal handling
+                        }
+                    }
+
                     // Handle pending d command for dd delete comment
                     if pending_d {
                         pending_d = false;
@@ -303,6 +343,11 @@ fn main() -> anyhow::Result<()> {
                     match action {
                         Action::PendingZCommand => {
                             pending_z = true;
+                            app.pending_count = None;
+                            continue;
+                        }
+                        Action::PendingShiftZCommand => {
+                            pending_shift_z = true;
                             app.pending_count = None;
                             continue;
                         }

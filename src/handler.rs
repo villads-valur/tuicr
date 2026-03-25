@@ -25,6 +25,14 @@ fn handle_export(app: &mut App) {
     }
 }
 
+/// Export and quit (used by ZZ keybinding).
+/// When --stdout is set, stores export content and quits.
+/// Otherwise, exports to clipboard and quits.
+pub fn handle_export_and_quit(app: &mut App) {
+    handle_export(app);
+    app.should_quit = true;
+}
+
 fn comment_line_start(buffer: &str, cursor: usize) -> usize {
     let cursor = cursor.min(buffer.len());
     match buffer[..cursor].rfind('\n') {
@@ -420,7 +428,7 @@ pub fn handle_commit_select_action(app: &mut App, action: Action) {
         }
         Action::ExitMode => {
             if let Err(e) = app.exit_commit_select_mode() {
-                app.set_error(format!("Failed to reload working tree: {e}"));
+                app.set_error(format!("Failed to reload changes: {e}"));
             }
         }
         Action::Quit => app.should_quit = true,

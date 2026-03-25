@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::io::Write as IoWrite;
 
 use arboard::Clipboard;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::app::{CommentTypeDefinition, DiffSource};
 use crate::error::{Result, TuicrError};
@@ -117,9 +117,12 @@ fn write_osc52<W: IoWrite>(writer: &mut W, text: &str) -> Result<()> {
 fn review_scope_label(diff_source: &DiffSource) -> String {
     let scope = match diff_source {
         DiffSource::WorkingTree => "working tree changes".to_string(),
+        DiffSource::StagedAndUnstaged => "staged + unstaged changes".to_string(),
+        DiffSource::Staged => "staged changes".to_string(),
+        DiffSource::Unstaged => "unstaged changes".to_string(),
         DiffSource::CommitRange(_) => "selected commit range".to_string(),
-        DiffSource::WorkingTreeAndCommits(_) => {
-            "selected commit range + working tree changes".to_string()
+        DiffSource::WorkingTreeAndCommits(_) | DiffSource::StagedUnstagedAndCommits(_) => {
+            "selected commit range + staged/unstaged changes".to_string()
         }
         DiffSource::PullRequest { base_ref, .. } => {
             format!("PR diff {base_ref}..HEAD")
@@ -146,6 +149,18 @@ fn generate_markdown(
     // Include commit range info if reviewing commits
     match diff_source {
         DiffSource::WorkingTree => {}
+        DiffSource::Staged => {
+            let _ = writeln!(md, "Reviewing staged changes");
+            let _ = writeln!(md);
+        }
+        DiffSource::Unstaged => {
+            let _ = writeln!(md, "Reviewing unstaged changes");
+            let _ = writeln!(md);
+        }
+        DiffSource::StagedAndUnstaged => {
+            let _ = writeln!(md, "Reviewing staged + unstaged changes");
+            let _ = writeln!(md);
+        }
         DiffSource::CommitRange(commits) => {
             if commits.len() == 1 {
                 let _ = writeln!(
@@ -159,11 +174,12 @@ fn generate_markdown(
             }
             let _ = writeln!(md);
         }
-        DiffSource::WorkingTreeAndCommits(commits) => {
+        DiffSource::WorkingTreeAndCommits(commits)
+        | DiffSource::StagedUnstagedAndCommits(commits) => {
             let short_ids: Vec<&str> = commits.iter().map(|c| &c[..7.min(c.len())]).collect();
             let _ = writeln!(
                 md,
-                "Reviewing working tree + commits: {}",
+                "Reviewing staged + unstaged + commits: {}",
                 short_ids.join(", ")
             );
             let _ = writeln!(md);
