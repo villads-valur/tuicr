@@ -557,8 +557,13 @@ fn render_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focused_panel == FocusedPanel::Diff;
 
+    let title = match app.current_file_path() {
+        Some(path) => format!(" Diff (Unified) \u{2014} {} ", path.display()),
+        None => " Diff (Unified) ".to_string(),
+    };
+
     let block = Block::default()
-        .title(" Diff (Unified) ")
+        .title(title)
         .borders(Borders::ALL)
         .style(styles::panel_style(&app.theme))
         .border_style(styles::border_style(&app.theme, focused));
@@ -579,6 +584,9 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     // Store the logical line index and column where the cursor should be
     let mut comment_cursor_logical_line: Option<usize> = None;
     let mut comment_cursor_column: u16 = 0;
+    // Track the full extent of the comment input box so we can auto-scroll
+    // the viewport to keep it visible while the user types.
+    let mut comment_input_box_range: Option<(usize, usize)> = None;
 
     let is_review_comment_mode =
         app.input_mode == InputMode::Comment && app.comment_is_review_level;
@@ -613,6 +621,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             );
             comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
             comment_cursor_column = 1 + cursor_info.column;
+            comment_input_box_range =
+                Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
             for mut input_line in input_lines {
                 let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -654,6 +664,7 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
         comment_cursor_column = 1 + cursor_info.column;
+        comment_input_box_range = Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
         for mut input_line in input_lines {
             let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -721,6 +732,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                     comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
                     // Column = indicator (1) + cursor_info.column
                     comment_cursor_column = 1 + cursor_info.column;
+                    comment_input_box_range =
+                        Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
                     for mut input_line in input_lines {
                         let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -771,6 +784,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             // Track cursor position
             comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
             comment_cursor_column = 1 + cursor_info.column;
+            comment_input_box_range =
+                Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
             for mut input_line in input_lines {
                 let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -1026,6 +1041,10 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                                         comment_cursor_logical_line =
                                             Some(line_idx + cursor_info.line_offset);
                                         comment_cursor_column = 1 + cursor_info.column;
+                                        comment_input_box_range = Some((
+                                            line_idx,
+                                            line_idx + input_lines.len().saturating_sub(1),
+                                        ));
 
                                         for mut input_line in input_lines {
                                             let indicator =
@@ -1090,6 +1109,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                                 );
                             comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
                             comment_cursor_column = 1 + cursor_info.column;
+                            comment_input_box_range =
+                                Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
                             for mut input_line in input_lines {
                                 let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -1139,6 +1160,10 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                                         comment_cursor_logical_line =
                                             Some(line_idx + cursor_info.line_offset);
                                         comment_cursor_column = 1 + cursor_info.column;
+                                        comment_input_box_range = Some((
+                                            line_idx,
+                                            line_idx + input_lines.len().saturating_sub(1),
+                                        ));
 
                                         for mut input_line in input_lines {
                                             let indicator =
@@ -1203,6 +1228,8 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                                 );
                             comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
                             comment_cursor_column = 1 + cursor_info.column;
+                            comment_input_box_range =
+                                Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
                             for mut input_line in input_lines {
                                 let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -1230,6 +1257,17 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         )));
         line_idx += 1;
     }
+
+    // Auto-scroll so the comment input box stays visible while the user types.
+    // Without this, adding a comment near the bottom/top of the viewport would
+    // place the input box off-screen and the user couldn't see what they type.
+    scroll_comment_input_into_view(
+        &mut app.diff_state.scroll_offset,
+        comment_input_box_range,
+        comment_cursor_logical_line,
+        inner.height as usize,
+        lines.len(),
+    );
 
     let visible_lines_unscrolled: Vec<Line> = lines
         .into_iter()
@@ -1361,6 +1399,10 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// Cursor info for the inline comment input box in side-by-side view:
+/// (cursor_logical_line, cursor_column, box_start_line, box_end_line)
+type SideBySideCursorInfo = (usize, u16, usize, usize);
+
 /// Context for rendering side-by-side diff lines
 struct SideBySideContext<'a> {
     app: &'a App,
@@ -1406,11 +1448,61 @@ fn comment_type_presentation(
     }
 }
 
+/// Adjust scroll_offset so the comment input box is visible in the viewport.
+///
+/// The input box is rendered inline in the diff view, so without this
+/// adjustment it can end up below (or above) the visible area when a
+/// comment is started near the viewport edge or when typing a multi-line
+/// comment grows the box past the bottom. If the box is taller than the
+/// viewport we fall back to keeping just the text cursor line visible.
+fn scroll_comment_input_into_view(
+    scroll_offset: &mut usize,
+    box_range: Option<(usize, usize)>,
+    cursor_line: Option<usize>,
+    viewport_height: usize,
+    total_lines: usize,
+) {
+    let Some((box_start, box_end)) = box_range else {
+        return;
+    };
+    if viewport_height == 0 {
+        return;
+    }
+
+    let box_height = box_end.saturating_sub(box_start) + 1;
+
+    if box_height <= viewport_height {
+        if box_start < *scroll_offset {
+            *scroll_offset = box_start;
+        } else if box_end >= *scroll_offset + viewport_height {
+            *scroll_offset = box_end + 1 - viewport_height;
+        }
+    } else if let Some(cursor) = cursor_line {
+        // Box too tall for viewport: keep the text cursor line visible.
+        if cursor < *scroll_offset {
+            *scroll_offset = cursor;
+        } else if cursor >= *scroll_offset + viewport_height {
+            *scroll_offset = cursor + 1 - viewport_height;
+        }
+    }
+
+    // Clamp so we never scroll past the last line.
+    let max_scroll = total_lines.saturating_sub(viewport_height);
+    if *scroll_offset > max_scroll {
+        *scroll_offset = max_scroll;
+    }
+}
+
 fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focused_panel == FocusedPanel::Diff;
 
+    let title = match app.current_file_path() {
+        Some(path) => format!(" Diff (Side-by-Side) \u{2014} {} ", path.display()),
+        None => " Diff (Side-by-Side) ".to_string(),
+    };
+
     let block = Block::default()
-        .title(" Diff (Side-by-Side) ")
+        .title(title)
         .borders(Borders::ALL)
         .style(styles::panel_style(&app.theme))
         .border_style(styles::border_style(&app.theme, focused));
@@ -1454,6 +1546,9 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     // Track cursor position for IME when in Comment mode
     let mut comment_cursor_logical_line: Option<usize> = None;
     let mut comment_cursor_column: u16 = 0;
+    // Track the full extent of the comment input box so we can auto-scroll
+    // the viewport to keep it visible while the user types.
+    let mut comment_input_box_range: Option<(usize, usize)> = None;
 
     let is_review_comment_mode =
         app.input_mode == InputMode::Comment && app.comment_is_review_level;
@@ -1488,6 +1583,8 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             );
             comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
             comment_cursor_column = 1 + cursor_info.column;
+            comment_input_box_range =
+                Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
             for mut input_line in input_lines {
                 let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -1529,6 +1626,7 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
         comment_cursor_column = 1 + cursor_info.column;
+        comment_input_box_range = Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
         for mut input_line in input_lines {
             let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -1593,6 +1691,8 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                     );
                     comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
                     comment_cursor_column = 1 + cursor_info.column;
+                    comment_input_box_range =
+                        Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
                     for mut input_line in input_lines {
                         let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -1642,6 +1742,8 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             );
             comment_cursor_logical_line = Some(line_idx + cursor_info.line_offset);
             comment_cursor_column = 1 + cursor_info.column;
+            comment_input_box_range =
+                Some((line_idx, line_idx + input_lines.len().saturating_sub(1)));
 
             for mut input_line in input_lines {
                 let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -1776,9 +1878,10 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                     &mut lines,
                 );
                 line_idx = new_line_idx;
-                if cursor_info.is_some() {
-                    comment_cursor_logical_line = cursor_info.map(|(line, _)| line);
-                    comment_cursor_column = cursor_info.map(|(_, col)| col).unwrap_or(0);
+                if let Some((line, col, box_start, box_end)) = cursor_info {
+                    comment_cursor_logical_line = Some(line);
+                    comment_cursor_column = col;
+                    comment_input_box_range = Some((box_start, box_end));
                 }
             }
         }
@@ -1791,6 +1894,15 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         )));
         line_idx += 1;
     }
+
+    // Auto-scroll so the comment input box stays visible while the user types.
+    scroll_comment_input_into_view(
+        &mut app.diff_state.scroll_offset,
+        comment_input_box_range,
+        comment_cursor_logical_line,
+        inner.height as usize,
+        lines.len(),
+    );
 
     let visible_lines_unscrolled: Vec<Line> = lines
         .into_iter()
@@ -1904,16 +2016,16 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Process and render all diff lines in a hunk for side-by-side view
-/// Returns (new_line_idx, Option<(cursor_logical_line, cursor_column)>)
+/// Returns (new_line_idx, optional cursor info for inline comment input)
 fn render_hunk_lines_side_by_side(
     hunk_lines: &[crate::model::DiffLine],
     line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
     ctx: &SideBySideContext,
     mut line_idx: usize,
     lines: &mut Vec<Line>,
-) -> (usize, Option<(usize, u16)>) {
+) -> (usize, Option<SideBySideCursorInfo>) {
     let mut i = 0;
-    let mut cursor_info_out: Option<(usize, u16)> = None;
+    let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
 
     while i < hunk_lines.len() {
         let diff_line = &hunk_lines[i];
@@ -1969,14 +2081,14 @@ fn render_hunk_lines_side_by_side(
 }
 
 /// Render a context line (appears on both sides)
-/// Returns (new_line_idx, Option<(cursor_logical_line, cursor_column)>)
+/// Returns (new_line_idx, optional cursor info for inline comment input)
 fn render_context_line_side_by_side(
     diff_line: &crate::model::DiffLine,
     line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
     ctx: &SideBySideContext,
     mut line_idx: usize,
     lines: &mut Vec<Line>,
-) -> (usize, Option<(usize, u16)>) {
+) -> (usize, Option<SideBySideCursorInfo>) {
     let line_num = diff_line
         .old_lineno
         .or(diff_line.new_lineno)
@@ -2032,7 +2144,7 @@ fn render_context_line_side_by_side(
     line_idx += 1;
 
     // Add comments if any
-    let mut cursor_info_out: Option<(usize, u16)> = None;
+    let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
     if let Some(new_ln) = diff_line.new_lineno {
         let (new_line_idx, cursor_info) =
             add_comments_to_line(new_ln, line_comments, LineSide::New, ctx, line_idx, lines);
@@ -2044,7 +2156,7 @@ fn render_context_line_side_by_side(
 }
 
 /// Render paired deletions and additions side-by-side
-/// Returns (line_idx, skip_count, Option<(cursor_logical_line, cursor_column)>)
+/// Returns (line_idx, skip_count, optional cursor info for inline comment input)
 fn render_deletion_addition_pair_side_by_side(
     hunk_lines: &[crate::model::DiffLine],
     start_idx: usize,
@@ -2052,7 +2164,7 @@ fn render_deletion_addition_pair_side_by_side(
     ctx: &SideBySideContext,
     mut line_idx: usize,
     lines: &mut Vec<Line>,
-) -> (usize, usize, Option<(usize, u16)>) {
+) -> (usize, usize, Option<SideBySideCursorInfo>) {
     // Find the range of consecutive deletions
     let mut del_end = start_idx + 1;
     while del_end < hunk_lines.len() && hunk_lines[del_end].origin == LineOrigin::Deletion {
@@ -2069,7 +2181,7 @@ fn render_deletion_addition_pair_side_by_side(
     let del_count = del_end - start_idx;
     let add_count = add_end - add_start;
     let max_lines = del_count.max(add_count);
-    let mut cursor_info_out: Option<(usize, u16)> = None;
+    let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
 
     // Render each pair of deletion/addition
     for offset in 0..max_lines {
@@ -2144,14 +2256,14 @@ fn render_deletion_addition_pair_side_by_side(
 }
 
 /// Render a standalone addition (no matching deletion)
-/// Returns (new_line_idx, Option<(cursor_logical_line, cursor_column)>)
+/// Returns (new_line_idx, optional cursor info for inline comment input)
 fn render_standalone_addition_side_by_side(
     diff_line: &crate::model::DiffLine,
     line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
     ctx: &SideBySideContext,
     mut line_idx: usize,
     lines: &mut Vec<Line>,
-) -> (usize, Option<(usize, u16)>) {
+) -> (usize, Option<SideBySideCursorInfo>) {
     let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
 
     let mut spans = vec![Span::styled(
@@ -2166,7 +2278,7 @@ fn render_standalone_addition_side_by_side(
     line_idx += 1;
 
     // Add comments if any
-    let mut cursor_info_out: Option<(usize, u16)> = None;
+    let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
     if let Some(new_ln) = diff_line.new_lineno {
         let (new_line_idx, cursor_info) =
             add_comments_to_line(new_ln, line_comments, LineSide::New, ctx, line_idx, lines);
@@ -2247,7 +2359,7 @@ fn add_empty_column_spans(spans: &mut Vec<Span>, content_width: usize) {
 }
 
 /// Add comments for a specific line.
-/// Returns (new_line_idx, Option<(cursor_logical_line, cursor_column)>)
+/// Returns (new_line_idx, optional cursor info for inline comment input)
 fn add_comments_to_line(
     line_num: u32,
     line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
@@ -2255,10 +2367,10 @@ fn add_comments_to_line(
     ctx: &SideBySideContext,
     mut line_idx: usize,
     lines: &mut Vec<Line>,
-) -> (usize, Option<(usize, u16)>) {
+) -> (usize, Option<SideBySideCursorInfo>) {
     // Check if we're adding/editing a comment on this line and side
     let is_line_comment_mode = ctx.comment_input_mode && ctx.comment_line == Some((line_num, side));
-    let mut cursor_info_out: Option<(usize, u16)> = None;
+    let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
 
     if let Some(comments) = line_comments.get(&line_num) {
         for comment in comments {
@@ -2284,8 +2396,13 @@ fn add_comments_to_line(
                         true,
                         ctx.supports_keyboard_enhancement,
                     );
-                    cursor_info_out =
-                        Some((line_idx + cursor_info.line_offset, 1 + cursor_info.column));
+                    let box_end = line_idx + input_lines.len().saturating_sub(1);
+                    cursor_info_out = Some((
+                        line_idx + cursor_info.line_offset,
+                        1 + cursor_info.column,
+                        line_idx,
+                        box_end,
+                    ));
 
                     for mut input_line in input_lines {
                         let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -2340,7 +2457,13 @@ fn add_comments_to_line(
             false,
             ctx.supports_keyboard_enhancement,
         );
-        cursor_info_out = Some((line_idx + cursor_info.line_offset, 1 + cursor_info.column));
+        let box_end = line_idx + input_lines.len().saturating_sub(1);
+        cursor_info_out = Some((
+            line_idx + cursor_info.line_offset,
+            1 + cursor_info.column,
+            line_idx,
+            box_end,
+        ));
 
         for mut input_line in input_lines {
             let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -2531,4 +2654,121 @@ fn apply_horizontal_scroll(line: Line, scroll_x: usize) -> Line {
     }
 
     Line::from(new_spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_return_string_unchanged_when_within_max_len() {
+        // given
+        let s = "hello";
+        // when
+        let result = truncate_str(s, 10);
+        // then
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn should_truncate_ascii_string_with_ellipsis() {
+        // given
+        let s = "hello world this is long";
+        // when
+        let result = truncate_str(s, 10);
+        // then
+        assert_eq!(result, "hello w...");
+    }
+
+    #[test]
+    fn should_truncate_without_panicking_on_multibyte_chars() {
+        // given - the exact string from the bug report
+        let s = "Resolve \"SD : Envoi en validation manuelle après 3 rejet de la fiche employé\"";
+        // when
+        let result = truncate_str(s, 47);
+        // then - should not panic and should end with "..."
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 47);
+    }
+
+    #[test]
+    fn should_handle_string_of_only_multibyte_chars() {
+        // given
+        let s = "ééééééééé";
+        // when
+        let result = truncate_str(s, 5);
+        // then
+        assert!(result.ends_with("..."));
+        assert!(result.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn should_not_scroll_when_comment_box_already_visible() {
+        // given: box at lines 5-7, viewport shows lines 0-9
+        let mut scroll = 0;
+        // when
+        scroll_comment_input_into_view(&mut scroll, Some((5, 7)), Some(6), 10, 100);
+        // then
+        assert_eq!(scroll, 0);
+    }
+
+    #[test]
+    fn should_scroll_down_when_comment_box_below_viewport() {
+        // given: box at lines 20-22, viewport shows lines 0-9
+        let mut scroll = 0;
+        // when
+        scroll_comment_input_into_view(&mut scroll, Some((20, 22)), Some(21), 10, 100);
+        // then: scroll so box_end (22) is the last visible line => scroll = 22 - 10 + 1 = 13
+        assert_eq!(scroll, 13);
+    }
+
+    #[test]
+    fn should_scroll_up_when_comment_box_above_viewport() {
+        // given: box at lines 5-7, viewport shows lines 20-29
+        let mut scroll = 20;
+        // when
+        scroll_comment_input_into_view(&mut scroll, Some((5, 7)), Some(6), 10, 100);
+        // then: scroll so box_start (5) is the first visible line
+        assert_eq!(scroll, 5);
+    }
+
+    #[test]
+    fn should_scroll_to_cursor_when_box_taller_than_viewport() {
+        // given: box spans 20 lines, viewport only 10 lines
+        let mut scroll = 0;
+        // when
+        scroll_comment_input_into_view(&mut scroll, Some((30, 49)), Some(45), 10, 100);
+        // then: scroll so cursor (45) is the last visible line => scroll = 45 - 10 + 1 = 36
+        assert_eq!(scroll, 36);
+    }
+
+    #[test]
+    fn should_not_scroll_past_end_of_content() {
+        // given: scroll already past max (e.g., content shrank)
+        let mut scroll = 200;
+        // when
+        scroll_comment_input_into_view(&mut scroll, Some((95, 97)), Some(96), 10, 100);
+        // then: clamped to max_scroll = 100 - 10 = 90
+        assert_eq!(scroll, 90);
+    }
+
+    #[test]
+    fn should_not_scroll_when_no_comment_box() {
+        // given
+        let mut scroll = 42;
+        // when
+        scroll_comment_input_into_view(&mut scroll, None, None, 10, 100);
+        // then
+        assert_eq!(scroll, 42);
+    }
+
+    #[test]
+    fn should_handle_box_partially_below_viewport() {
+        // given: viewport shows 0-9, box starts at 8 and ends at 10 (footer off-screen)
+        let mut scroll = 0;
+        // when
+        scroll_comment_input_into_view(&mut scroll, Some((8, 10)), Some(9), 10, 100);
+        // then: scroll so box_end (10) is visible => scroll = 10 - 10 + 1 = 1
+        assert_eq!(scroll, 1);
+    }
 }
