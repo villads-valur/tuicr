@@ -7,7 +7,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, DiffViewMode, FileTreeItem, FocusedPanel, GapId, InputMode};
+use crate::app::{
+    App, DiffViewMode, ExpandDirection, FileTreeItem, FocusedPanel, GAP_EXPAND_BATCH, GapId,
+    InputMode,
+};
 use crate::model::{LineOrigin, LineRange, LineSide};
 use crate::theme::Theme;
 use crate::ui::{comment_panel, help_popup, status_bar, styles};
@@ -554,16 +557,46 @@ fn render_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// Build a right-aligned title showing diff stats for the current scope.
+/// In overview: total stats across all files. In a file: that file's stats.
+fn diff_stat_title(app: &App) -> Line<'static> {
+    let (additions, deletions) = if app.is_cursor_in_overview() || app.current_file_path().is_none()
+    {
+        let (_, a, d) = app.diff_stat();
+        (a, d)
+    } else {
+        app.diff_files[app.diff_state.current_file_idx].stat()
+    };
+
+    let theme = &app.theme;
+    Line::from(vec![
+        Span::styled(
+            format!(" +{additions}"),
+            Style::default().fg(theme.diff_add),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("-{deletions} "),
+            Style::default().fg(theme.diff_del),
+        ),
+    ])
+}
+
 fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focused_panel == FocusedPanel::Diff;
 
-    let title = match app.current_file_path() {
-        Some(path) => format!(" Diff (Unified) \u{2014} {} ", path.display()),
-        None => " Diff (Unified) ".to_string(),
+    let title = if app.is_cursor_in_overview() || app.current_file_path().is_none() {
+        " Diff (Unified) \u{2014} Overview ".to_string()
+    } else {
+        format!(
+            " Diff (Unified) \u{2014} {} ",
+            app.current_file_path().unwrap().display()
+        )
     };
 
     let block = Block::default()
         .title(title)
+        .title_top(diff_stat_title(app).right_aligned())
         .borders(Borders::ALL)
         .style(styles::panel_style(&app.theme))
         .border_style(styles::border_style(&app.theme, focused));
@@ -844,49 +877,93 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 let gap_id = GapId { file_idx, hunk_idx };
 
                 if gap > 0 {
-                    if app.is_gap_expanded(&gap_id) {
-                        // Render expanded context lines
-                        if let Some(expanded_lines) = app.expanded_content.get(&gap_id) {
-                            for expanded_line in expanded_lines {
-                                let indicator = cursor_indicator(line_idx, current_line_idx);
-                                let line_num = expanded_line
-                                    .new_lineno
-                                    .map(|n| format!("{n:>4} "))
-                                    .unwrap_or_else(|| "     ".to_string());
+                    let top_lines = app.expanded_top.get(&gap_id);
+                    let bot_lines = app.expanded_bottom.get(&gap_id);
+                    let top_len = top_lines.map_or(0, |v| v.len());
+                    let bot_len = bot_lines.map_or(0, |v| v.len());
+                    let remaining = (gap as usize).saturating_sub(top_len + bot_len);
+                    let is_top_of_file = hunk_idx == 0;
 
-                                let line_spans = vec![
-                                    Span::styled(
-                                        indicator,
-                                        styles::current_line_indicator_style(&app.theme),
-                                    ),
-                                    Span::styled(
-                                        line_num,
-                                        styles::expanded_context_style(&app.theme),
-                                    ),
-                                    Span::styled("  ", styles::expanded_context_style(&app.theme)),
-                                    Span::styled(
-                                        expanded_line.content.clone(),
-                                        styles::expanded_context_style(&app.theme),
-                                    ),
-                                ];
-                                lines.push(Line::from(line_spans));
-                                line_idx += 1;
-                            }
+                    // Render top expanded lines
+                    if let Some(top) = top_lines {
+                        for expanded_line in top {
+                            render_expanded_context_line(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                expanded_line,
+                                &app.theme,
+                            );
                         }
-                    } else {
-                        // Render expander line
-                        let indicator = cursor_indicator_spaced(line_idx, current_line_idx);
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                indicator,
-                                styles::current_line_indicator_style(&app.theme),
-                            ),
-                            Span::styled(
-                                format!("       ... expand ({gap} lines) ..."),
-                                styles::dim_style(&app.theme),
-                            ),
-                        ]));
-                        line_idx += 1;
+                    }
+
+                    // Render expanders / hidden lines
+                    if remaining > 0 {
+                        if is_top_of_file {
+                            if remaining > GAP_EXPAND_BATCH {
+                                render_hidden_lines(
+                                    &mut lines,
+                                    &mut line_idx,
+                                    current_line_idx,
+                                    remaining,
+                                    &app.theme,
+                                );
+                            }
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                ExpandDirection::Up,
+                                remaining,
+                                &app.theme,
+                            );
+                        } else if remaining >= GAP_EXPAND_BATCH {
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                ExpandDirection::Down,
+                                remaining,
+                                &app.theme,
+                            );
+                            render_hidden_lines(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                remaining,
+                                &app.theme,
+                            );
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                ExpandDirection::Up,
+                                remaining,
+                                &app.theme,
+                            );
+                        } else {
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                ExpandDirection::Both,
+                                remaining,
+                                &app.theme,
+                            );
+                        }
+                    }
+
+                    // Render bottom expanded lines
+                    if let Some(bot) = bot_lines {
+                        for expanded_line in bot {
+                            render_expanded_context_line(
+                                &mut lines,
+                                &mut line_idx,
+                                current_line_idx,
+                                expanded_line,
+                                &app.theme,
+                            );
+                        }
                     }
                 }
 
@@ -1438,6 +1515,111 @@ fn cursor_indicator_spaced(line_idx: usize, current_line_idx: usize) -> &'static
     }
 }
 
+/// Render a single expanded context line (shared by unified + side-by-side via unified path)
+fn render_expanded_context_line(
+    lines: &mut Vec<Line<'_>>,
+    line_idx: &mut usize,
+    current_line_idx: usize,
+    expanded_line: &crate::model::DiffLine,
+    theme: &Theme,
+) {
+    let indicator = cursor_indicator(*line_idx, current_line_idx);
+    let line_num = expanded_line
+        .new_lineno
+        .map(|n| format!("{n:>4} "))
+        .unwrap_or_else(|| "     ".to_string());
+    let line_spans = vec![
+        Span::styled(indicator, styles::current_line_indicator_style(theme)),
+        Span::styled(line_num, styles::expanded_context_style(theme)),
+        Span::styled("  ", styles::expanded_context_style(theme)),
+        Span::styled(
+            expanded_line.content.clone(),
+            styles::expanded_context_style(theme),
+        ),
+    ];
+    lines.push(Line::from(line_spans));
+    *line_idx += 1;
+}
+
+/// Render an expander line with direction arrow
+fn render_expander_line(
+    lines: &mut Vec<Line<'_>>,
+    line_idx: &mut usize,
+    current_line_idx: usize,
+    direction: ExpandDirection,
+    remaining: usize,
+    theme: &Theme,
+) {
+    let arrow = match direction {
+        ExpandDirection::Down => "↓",
+        ExpandDirection::Up => "↑",
+        ExpandDirection::Both => "↕",
+    };
+    let count = remaining.min(GAP_EXPAND_BATCH);
+    let indicator = cursor_indicator_spaced(*line_idx, current_line_idx);
+    lines.push(Line::from(vec![
+        Span::styled(indicator, styles::current_line_indicator_style(theme)),
+        Span::styled(
+            format!("       ... {arrow} expand ({count} lines) ..."),
+            styles::dim_style(theme),
+        ),
+    ]));
+    *line_idx += 1;
+}
+
+/// Render a single expanded context line in side-by-side mode
+fn render_sbs_expanded_context_line(
+    lines: &mut Vec<Line<'_>>,
+    line_idx: &mut usize,
+    current_line_idx: usize,
+    expanded_line: &crate::model::DiffLine,
+    content_width: usize,
+    theme: &Theme,
+) {
+    let indicator = cursor_indicator(*line_idx, current_line_idx);
+    let line_num = expanded_line
+        .new_lineno
+        .map(|n| format!("{n:>4} "))
+        .unwrap_or_else(|| "     ".to_string());
+    let line_spans = vec![
+        Span::styled(indicator, styles::current_line_indicator_style(theme)),
+        Span::styled(line_num.clone(), styles::expanded_context_style(theme)),
+        Span::styled(" ", styles::expanded_context_style(theme)),
+        Span::styled(
+            truncate_or_pad(&expanded_line.content, content_width),
+            styles::expanded_context_style(theme),
+        ),
+        Span::styled(" │ ", styles::dim_style(theme)),
+        Span::styled(line_num, styles::expanded_context_style(theme)),
+        Span::styled(" ", styles::expanded_context_style(theme)),
+        Span::styled(
+            truncate_or_pad(&expanded_line.content, content_width),
+            styles::expanded_context_style(theme),
+        ),
+    ];
+    lines.push(Line::from(line_spans));
+    *line_idx += 1;
+}
+
+/// Render a "N lines hidden" informational line
+fn render_hidden_lines(
+    lines: &mut Vec<Line<'_>>,
+    line_idx: &mut usize,
+    current_line_idx: usize,
+    count: usize,
+    theme: &Theme,
+) {
+    let indicator = cursor_indicator_spaced(*line_idx, current_line_idx);
+    lines.push(Line::from(vec![
+        Span::styled(indicator, styles::current_line_indicator_style(theme)),
+        Span::styled(
+            format!("       ... {count} lines hidden ..."),
+            styles::dim_style(theme),
+        ),
+    ]));
+    *line_idx += 1;
+}
+
 fn comment_type_presentation(
     app: &App,
     comment_type: &crate::model::CommentType,
@@ -1496,13 +1678,18 @@ fn scroll_comment_input_into_view(
 fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focused_panel == FocusedPanel::Diff;
 
-    let title = match app.current_file_path() {
-        Some(path) => format!(" Diff (Side-by-Side) \u{2014} {} ", path.display()),
-        None => " Diff (Side-by-Side) ".to_string(),
+    let title = if app.is_cursor_in_overview() || app.current_file_path().is_none() {
+        " Diff (Side-by-Side) \u{2014} Overview ".to_string()
+    } else {
+        format!(
+            " Diff (Side-by-Side) \u{2014} {} ",
+            app.current_file_path().unwrap().display()
+        )
     };
 
     let block = Block::default()
         .title(title)
+        .title_top(diff_stat_title(app).right_aligned())
         .borders(Borders::ALL)
         .style(styles::panel_style(&app.theme))
         .border_style(styles::border_style(&app.theme, focused));
@@ -1801,60 +1988,95 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 let gap_id = GapId { file_idx, hunk_idx };
 
                 if gap > 0 {
-                    if app.is_gap_expanded(&gap_id) {
-                        // Render expanded context lines
-                        if let Some(expanded_lines) = app.expanded_content.get(&gap_id) {
-                            for expanded_line in expanded_lines {
-                                let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
-                                let line_num = expanded_line
-                                    .new_lineno
-                                    .map(|n| format!("{n:>4} "))
-                                    .unwrap_or_else(|| "     ".to_string());
+                    let top_lines = app.expanded_top.get(&gap_id);
+                    let bot_lines = app.expanded_bottom.get(&gap_id);
+                    let top_len = top_lines.map_or(0, |v| v.len());
+                    let bot_len = bot_lines.map_or(0, |v| v.len());
+                    let remaining = (gap as usize).saturating_sub(top_len + bot_len);
+                    let is_top_of_file = hunk_idx == 0;
 
-                                // In side-by-side, show context on both sides
-                                let line_spans = vec![
-                                    Span::styled(
-                                        indicator,
-                                        styles::current_line_indicator_style(&app.theme),
-                                    ),
-                                    Span::styled(
-                                        line_num.clone(),
-                                        styles::expanded_context_style(&app.theme),
-                                    ),
-                                    Span::styled("  ", styles::expanded_context_style(&app.theme)),
-                                    Span::styled(
-                                        truncate_or_pad(&expanded_line.content, ctx.content_width),
-                                        styles::expanded_context_style(&app.theme),
-                                    ),
-                                    Span::styled(" │ ", styles::dim_style(&app.theme)),
-                                    Span::styled(
-                                        line_num,
-                                        styles::expanded_context_style(&app.theme),
-                                    ),
-                                    Span::styled("  ", styles::expanded_context_style(&app.theme)),
-                                    Span::styled(
-                                        truncate_or_pad(&expanded_line.content, ctx.content_width),
-                                        styles::expanded_context_style(&app.theme),
-                                    ),
-                                ];
-                                lines.push(Line::from(line_spans));
-                                line_idx += 1;
-                            }
+                    // Render top expanded lines
+                    if let Some(top) = top_lines {
+                        for expanded_line in top {
+                            render_sbs_expanded_context_line(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                expanded_line,
+                                ctx.content_width,
+                                &app.theme,
+                            );
                         }
-                    } else {
-                        // Render expander line
-                        let indicator = cursor_indicator_spaced(line_idx, ctx.current_line_idx);
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                indicator,
-                                styles::current_line_indicator_style(&app.theme),
-                            ),
-                            Span::styled(
-                                format!("       ... expand ({gap} lines) ..."),
-                                styles::dim_style(&app.theme),
-                            ),
-                        ]));
-                        line_idx += 1;
+                    }
+
+                    // Render expanders / hidden lines
+                    if remaining > 0 {
+                        if is_top_of_file {
+                            if remaining > GAP_EXPAND_BATCH {
+                                render_hidden_lines(
+                                    &mut lines,
+                                    &mut line_idx,
+                                    ctx.current_line_idx,
+                                    remaining,
+                                    &app.theme,
+                                );
+                            }
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                ExpandDirection::Up,
+                                remaining,
+                                &app.theme,
+                            );
+                        } else if remaining >= GAP_EXPAND_BATCH {
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                ExpandDirection::Down,
+                                remaining,
+                                &app.theme,
+                            );
+                            render_hidden_lines(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                remaining,
+                                &app.theme,
+                            );
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                ExpandDirection::Up,
+                                remaining,
+                                &app.theme,
+                            );
+                        } else {
+                            render_expander_line(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                ExpandDirection::Both,
+                                remaining,
+                                &app.theme,
+                            );
+                        }
+                    }
+
+                    // Render bottom expanded lines
+                    if let Some(bot) = bot_lines {
+                        for expanded_line in bot {
+                            render_sbs_expanded_context_line(
+                                &mut lines,
+                                &mut line_idx,
+                                ctx.current_line_idx,
+                                expanded_line,
+                                ctx.content_width,
+                                &app.theme,
+                            );
+                        }
                     }
                 }
 
@@ -2770,5 +2992,32 @@ mod tests {
         scroll_comment_input_into_view(&mut scroll, Some((8, 10)), Some(9), 10, 100);
         // then: scroll so box_end (10) is visible => scroll = 10 - 10 + 1 = 1
         assert_eq!(scroll, 1);
+    }
+
+    #[test]
+    fn should_pad_highlighted_spans_to_exact_width() {
+        // given - highlighted spans from the syntax highlighter (which strips
+        // the trailing \n that syntect includes). Short content gets padded
+        // by truncate_or_pad_spans; the result must have exactly `width`
+        // characters so the side-by-side separator stays aligned.
+        let highlighter = crate::syntax::SyntaxHighlighter::default();
+        let lines = vec!["let x = 1;".to_string()];
+        let highlighted = highlighter
+            .highlight_file_lines(std::path::Path::new("test.rs"), &lines)
+            .unwrap();
+        let spans = highlighted[0].as_ref().unwrap();
+
+        let width = 80;
+
+        // when
+        let result = truncate_or_pad_spans(spans, width, Style::default());
+
+        // then - total char count must equal the target width so each
+        // side-by-side column is the same size
+        let total_chars: usize = result.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(
+            total_chars, width,
+            "padded spans should have exactly {width} chars, got {total_chars}"
+        );
     }
 }

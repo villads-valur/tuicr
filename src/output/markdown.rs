@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::io::Write as IoWrite;
 
@@ -17,19 +18,26 @@ pub fn generate_export_content(
     session: &ReviewSession,
     diff_source: &DiffSource,
     comment_types: &[CommentTypeDefinition],
+    show_legend: bool,
 ) -> Result<String> {
     if !session.has_comments() {
         return Err(TuicrError::NoComments);
     }
-    Ok(generate_markdown(session, diff_source, comment_types))
+    Ok(generate_markdown(
+        session,
+        diff_source,
+        comment_types,
+        show_legend,
+    ))
 }
 
 pub fn export_to_clipboard(
     session: &ReviewSession,
     diff_source: &DiffSource,
     comment_types: &[CommentTypeDefinition],
+    show_legend: bool,
 ) -> Result<String> {
-    let content = generate_export_content(session, diff_source, comment_types)?;
+    let content = generate_export_content(session, diff_source, comment_types, show_legend)?;
 
     // Prefer OSC 52 in tmux/SSH where arboard may silently fail
     if should_prefer_osc52() {
@@ -135,6 +143,7 @@ fn generate_markdown(
     session: &ReviewSession,
     diff_source: &DiffSource,
     comment_types: &[CommentTypeDefinition],
+    show_legend: bool,
 ) -> String {
     let mut md = String::new();
 
@@ -205,27 +214,43 @@ fn generate_markdown(
         }
     }
 
-    let legend = if comment_types.is_empty() {
-        "NOTE, SUGGESTION, ISSUE, PRAISE".to_string()
-    } else {
-        comment_types
-            .iter()
-            .map(|comment_type| {
-                let definition = comment_type
-                    .definition
-                    .as_deref()
-                    .unwrap_or(comment_type.id.as_str());
-                format!(
-                    "{} ({})",
-                    comment_type.label.to_ascii_uppercase(),
-                    definition
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let _ = writeln!(md, "Comment types: {legend}");
-    let _ = writeln!(md);
+    if show_legend {
+        let used_ids = collect_used_comment_type_ids(session);
+        let legend = if comment_types.is_empty() {
+            let all = ["NOTE", "SUGGESTION", "ISSUE", "PRAISE"];
+            let filtered: Vec<&str> = if used_ids.is_empty() {
+                all.to_vec()
+            } else {
+                all.iter()
+                    .copied()
+                    .filter(|t| used_ids.contains(&t.to_ascii_lowercase()))
+                    .collect()
+            };
+            filtered.join(", ")
+        } else {
+            let filtered: Vec<_> = comment_types
+                .iter()
+                .filter(|ct| used_ids.is_empty() || used_ids.contains(&ct.id))
+                .collect();
+            filtered
+                .iter()
+                .map(|comment_type| {
+                    let definition = comment_type
+                        .definition
+                        .as_deref()
+                        .unwrap_or(comment_type.id.as_str());
+                    format!(
+                        "{} ({})",
+                        comment_type.label.to_ascii_uppercase(),
+                        definition
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let _ = writeln!(md, "Comment types: {legend}");
+        let _ = writeln!(md);
+    }
 
     // Session notes/summary
     if let Some(notes) = &session.session_notes {
@@ -319,6 +344,24 @@ fn generate_markdown(
     md
 }
 
+fn collect_used_comment_type_ids(session: &ReviewSession) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for c in &session.review_comments {
+        ids.insert(c.comment_type.id().to_string());
+    }
+    for review in session.files.values() {
+        for c in &review.file_comments {
+            ids.insert(c.comment_type.id().to_string());
+        }
+        for comments in review.line_comments.values() {
+            for c in comments {
+                ids.insert(c.comment_type.id().to_string());
+            }
+        }
+    }
+    ids
+}
+
 fn export_comment_type_label(
     comment_type: &CommentType,
     comment_types: &[CommentTypeDefinition],
@@ -406,12 +449,15 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("I reviewed your code and have the following comments"));
-        assert!(markdown.contains("Comment types:"));
-        assert!(markdown.contains("SUGGESTION (improvements)"));
+        assert!(
+            markdown.contains("Comment types: SUGGESTION (improvements), ISSUE (problems to fix)")
+        );
+        assert!(!markdown.contains("NOTE"));
+        assert!(!markdown.contains("PRAISE"));
         assert!(markdown.contains("[SUGGESTION]"));
         assert!(markdown.contains("`src/main.rs`"));
         assert!(markdown.contains("Consider adding documentation"));
@@ -444,7 +490,7 @@ mod tests {
             color: None,
         }];
 
-        let markdown = generate_markdown(&session, &DiffSource::WorkingTree, &custom_types);
+        let markdown = generate_markdown(&session, &DiffSource::WorkingTree, &custom_types, true);
 
         assert!(markdown.contains("Comment types: QUESTION (ask for clarification)"));
         assert!(markdown.contains("**[QUESTION]**"));
@@ -457,7 +503,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         // Should have 2 numbered comments
@@ -474,7 +520,8 @@ mod tests {
             None,
         ));
 
-        let markdown = generate_markdown(&session, &DiffSource::WorkingTree, &comment_types());
+        let markdown =
+            generate_markdown(&session, &DiffSource::WorkingTree, &comment_types(), true);
 
         assert!(markdown
             .contains("`Review Comment (scope: working tree changes)` - Please split this into smaller commits"));
@@ -493,6 +540,7 @@ mod tests {
             &session,
             &DiffSource::CommitRange(vec!["abc1234567890".to_string()]),
             &comment_types(),
+            true,
         );
 
         assert!(markdown.contains(
@@ -512,7 +560,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let result = export_to_clipboard(&session, &diff_source, &comment_types());
+        let result = export_to_clipboard(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(result.is_err());
@@ -526,7 +574,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let result = generate_export_content(&session, &diff_source, &comment_types());
+        let result = generate_export_content(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(result.is_ok());
@@ -548,7 +596,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let result = generate_export_content(&session, &diff_source, &comment_types());
+        let result = generate_export_content(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(result.is_err());
@@ -565,7 +613,7 @@ mod tests {
         ]);
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("Reviewing commits: abc1234, def4567"));
@@ -578,7 +626,7 @@ mod tests {
         let diff_source = DiffSource::CommitRange(vec!["abc1234567890".to_string()]);
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("Reviewing commit: abc1234"));
@@ -639,7 +687,7 @@ mod tests {
         // given - simulate what would be copied during export
         let session = create_test_session();
         let diff_source = DiffSource::WorkingTree;
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
         let mut buffer: Vec<u8> = Vec::new();
 
         // when
@@ -681,7 +729,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("`src/main.rs:42`"));
@@ -714,7 +762,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("`src/main.rs:10-15`"));
@@ -747,7 +795,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("`src/main.rs:~20-~25`"));
@@ -779,7 +827,7 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("`src/main.rs:~30`"));
@@ -811,9 +859,85 @@ mod tests {
         let diff_source = DiffSource::WorkingTree;
 
         // when
-        let markdown = generate_markdown(&session, &diff_source, &comment_types());
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), true);
 
         // then
         assert!(markdown.contains("`src/main.rs:50`"));
+    }
+
+    #[test]
+    fn should_omit_legend_when_show_legend_is_false() {
+        let session = create_test_session();
+        let diff_source = DiffSource::WorkingTree;
+
+        let markdown = generate_markdown(&session, &diff_source, &comment_types(), false);
+
+        assert!(!markdown.contains("Comment types:"));
+        assert!(markdown.contains("[SUGGESTION]"));
+        assert!(markdown.contains("[ISSUE]"));
+    }
+
+    #[test]
+    fn should_only_list_used_comment_types_in_legend() {
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
+        session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
+        if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
+            review.add_file_comment(Comment::new(
+                "Great work!".to_string(),
+                CommentType::Praise,
+                None,
+            ));
+        }
+
+        let markdown =
+            generate_markdown(&session, &DiffSource::WorkingTree, &comment_types(), true);
+
+        assert!(markdown.contains("Comment types: PRAISE (positive feedback)"));
+        assert!(!markdown.contains("NOTE"));
+        assert!(!markdown.contains("SUGGESTION"));
+        assert!(!markdown.contains("ISSUE"));
+    }
+
+    #[test]
+    fn should_only_list_used_custom_types_in_legend() {
+        let mut session = ReviewSession::new(
+            PathBuf::from("/tmp/test-repo"),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            SessionDiffSource::WorkingTree,
+        );
+        session.add_file(PathBuf::from("src/main.rs"), FileStatus::Modified);
+        if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
+            review.add_file_comment(Comment::new(
+                "Needs clarification".to_string(),
+                CommentType::Note,
+                None,
+            ));
+        }
+
+        let custom_types = vec![
+            CommentTypeDefinition {
+                id: "note".to_string(),
+                label: "question".to_string(),
+                definition: Some("ask for clarification".to_string()),
+                color: None,
+            },
+            CommentTypeDefinition {
+                id: "issue".to_string(),
+                label: "issue".to_string(),
+                definition: Some("problems to fix".to_string()),
+                color: None,
+            },
+        ];
+
+        let markdown = generate_markdown(&session, &DiffSource::WorkingTree, &custom_types, true);
+
+        assert!(markdown.contains("Comment types: QUESTION (ask for clarification)"));
+        assert!(!markdown.contains("ISSUE"));
     }
 }
