@@ -23,6 +23,10 @@ pub enum Action {
     PendingSemicolonCommand,
     ScrollLeft(usize),
     ScrollRight(usize),
+    ScrollViewDown(usize),
+    ScrollViewUp(usize),
+    MouseScrollUp(usize),
+    MouseScrollDown(usize),
 
     // Panel focus
     ToggleFocus,
@@ -110,6 +114,8 @@ fn map_normal_mode(key: KeyEvent) -> Action {
         // Cursor movement (vim-like: cursor moves, scroll follows when needed)
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::CursorDown(1),
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::CursorUp(1),
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => Action::ScrollViewDown(1),
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => Action::ScrollViewUp(1),
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => Action::HalfPageDown,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::HalfPageUp,
         (KeyCode::Char('f'), KeyModifiers::CONTROL) => Action::PageDown,
@@ -174,6 +180,7 @@ fn map_command_mode(key: KeyEvent) -> Action {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, KeyModifiers::NONE) => Action::ExitMode,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::SubmitInput,
+        (KeyCode::Backspace, mods) if mods.contains(KeyModifiers::ALT) => Action::DeleteWord,
         (KeyCode::Backspace, KeyModifiers::NONE) => Action::DeleteChar,
         (KeyCode::Char('w'), KeyModifiers::CONTROL) => Action::DeleteWord,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::ClearLine,
@@ -186,6 +193,7 @@ fn map_search_mode(key: KeyEvent) -> Action {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, KeyModifiers::NONE) => Action::ExitMode,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::SubmitInput,
+        (KeyCode::Backspace, mods) if mods.contains(KeyModifiers::ALT) => Action::DeleteWord,
         (KeyCode::Backspace, KeyModifiers::NONE) => Action::DeleteChar,
         (KeyCode::Char('w'), KeyModifiers::CONTROL) => Action::DeleteWord,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::ClearLine,
@@ -238,7 +246,9 @@ fn map_comment_mode(key: KeyEvent) -> Action {
         (KeyCode::Right, KeyModifiers::NONE) => Action::TextCursorRight,
         // Editing
         (KeyCode::Backspace, mods)
-            if mods.contains(KeyModifiers::SUPER) || mods.contains(KeyModifiers::META) =>
+            if mods.contains(KeyModifiers::ALT)
+                || mods.contains(KeyModifiers::SUPER)
+                || mods.contains(KeyModifiers::META) =>
         {
             Action::DeleteWord
         }
@@ -398,5 +408,55 @@ mod tests {
     fn should_map_backtab_to_reverse_comment_type_in_comment_mode() {
         let action = map_comment_mode(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(action, Action::CycleCommentTypeReverse);
+    }
+
+    #[test]
+    fn should_map_alt_backspace_to_delete_word_in_text_input_modes() {
+        let alt_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(map_comment_mode(alt_backspace), Action::DeleteWord);
+        assert_eq!(map_command_mode(alt_backspace), Action::DeleteWord);
+        assert_eq!(map_search_mode(alt_backspace), Action::DeleteWord);
+    }
+
+    #[test]
+    fn no_key_should_produce_mouse_scroll_actions() {
+        let codes = [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('e'),
+            KeyCode::Char('y'),
+        ];
+        let mod_sets = [
+            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT,
+        ];
+        for code in codes {
+            for mods in mod_sets {
+                let ev = KeyEvent::new(code, mods);
+                for action in [
+                    map_normal_mode(ev),
+                    map_command_mode(ev),
+                    map_search_mode(ev),
+                    map_comment_mode(ev),
+                    map_help_mode(ev),
+                ] {
+                    assert!(
+                        !matches!(
+                            action,
+                            Action::MouseScrollUp(_) | Action::MouseScrollDown(_)
+                        ),
+                        "key {code:?} + {mods:?} produced a mouse-scroll action"
+                    );
+                }
+            }
+        }
     }
 }

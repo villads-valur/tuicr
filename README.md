@@ -147,7 +147,7 @@ theme_light = "gruvbox-light"
 show_file_list = false
 diff_view = "side-by-side"
 wrap = true
-
+cursor_line = false
 
 comment_types = [
   { id = "note", label = "question", definition = "ask for clarification", color = "yellow" },
@@ -164,6 +164,7 @@ comment_types = [
 
 `wrap` enables line wrapping in the diff view (default: `false`). Toggle at runtime with `:set wrap!`.
 
+`cursor_line` highlights the current cursor line and visual selection in the diff view (default: `true`). Set to `false` to disable.
 
 `comment_types` replaces the default list and defines Tab cycle order.
 Each entry requires `id` and can optionally set `label`, `definition`, and `color`.
@@ -215,6 +216,23 @@ dist/
 *.lock
 !Cargo.lock
 ```
+
+### Mouse
+
+Mouse support is **opt-in**. Enable it in your config:
+
+```toml
+mouse = true
+```
+
+| Action | Effect |
+|--------|--------|
+| Wheel up/down | Scroll the panel under the cursor (file list, diff, or help popup) without moving the cursor line |
+| Click on a file | Jump to that file (lazygit-style) |
+| Click on a directory | Expand or collapse it |
+| Click on a diff line | Position the cursor on that line |
+
+When mouse capture is on, the terminal stops handling drag-to-select natively. To copy text, hold your terminal's bypass modifier while dragging (commonly **Shift** or **Option/Alt**, depending on the terminal). Check your terminal's docs if neither works.
 
 ### Keybindings
 
@@ -287,7 +305,7 @@ dist/
 | `Enter` / `Ctrl-Enter` / `Ctrl-s` | Save comment |
 | `Shift-Enter` / `Ctrl-j` | Insert newline |
 | `←` / `→` | Move cursor |
-| `Ctrl-w` | Delete word |
+| `Ctrl-w` / `Alt-Backspace` / `Cmd-Backspace` | Delete word |
 | `Ctrl-u` | Clear line |
 | `Esc` / `Ctrl-c` | Cancel |
 

@@ -1,6 +1,7 @@
 pub mod context;
 pub mod diff;
 pub mod repository;
+pub mod staging;
 
 use git2::Repository;
 use std::path::Path;
@@ -146,5 +147,9 @@ impl VcsBackend for GitBackend {
         highlighter: &SyntaxHighlighter,
     ) -> Result<PullRequestDiff> {
         get_pull_request_diff(&self.repo, base_ref, highlighter)
+    }
+
+    fn stage_file(&self, path: &Path) -> Result<()> {
+        staging::stage_file(&self.repo, path)
     }
 }

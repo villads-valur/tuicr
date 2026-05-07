@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod error;
 mod handler;
+mod hash;
 mod input;
 mod model;
 mod output;
@@ -21,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -36,7 +37,8 @@ use app::{App, FocusedPanel, InputMode};
 use handler::{
     handle_command_action, handle_comment_action, handle_commit_select_action,
     handle_commit_selector_action, handle_confirm_action, handle_diff_action,
-    handle_file_list_action, handle_help_action, handle_search_action, handle_visual_action,
+    handle_file_list_action, handle_help_action, handle_mouse_event, handle_search_action,
+    handle_visual_action,
 };
 use input::{Action, map_key_to_action};
 use theme::{parse_cli_args, resolve_theme_with_config};
@@ -51,6 +53,7 @@ fn main() -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic_info);
@@ -179,6 +182,14 @@ fn main() -> anyhow::Result<()> {
         Box::new(io::stdout())
     };
     execute!(tty_output, EnterAlternateScreen)?;
+    let mouse_enabled = config_outcome
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.mouse)
+        .unwrap_or(false);
+    if mouse_enabled {
+        execute!(tty_output, EnableMouseCapture)?;
+    }
 
     // Enable keyboard enhancement for better modifier key detection (e.g., Alt+Enter)
     // This is supported by modern terminals like Kitty, iTerm2, WezTerm, etc.
@@ -205,6 +216,9 @@ fn main() -> anyhow::Result<()> {
         }
         if cfg.export_legend == Some(false) {
             app.export_legend = false;
+        }
+        if cfg.cursor_line == Some(false) {
+            app.cursor_line_highlight = false;
         }
     }
 
@@ -438,6 +452,7 @@ fn main() -> anyhow::Result<()> {
                         },
                     }
                 }
+                Event::Mouse(mouse_event) => handle_mouse_event(&mut app, mouse_event),
                 _ => {}
             }
         }
@@ -449,6 +464,9 @@ fn main() -> anyhow::Result<()> {
 
     // Restore terminal
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    if mouse_enabled {
+        let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+    }
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
