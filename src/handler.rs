@@ -1,12 +1,72 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Position;
+
 use crate::app::{
-    self, App, DiffSource, ExpandDirection, FileTreeItem, FocusedPanel, GapCursorHit,
+    self, App, DiffSource, ExpandDirection, FileTreeItem, FocusedPanel, GapCursorHit, InputMode,
 };
 use crate::input::Action;
+use crate::model::ClearScope;
 use crate::output::{export_to_clipboard, generate_export_content};
 use crate::persistence::save_session;
 use crate::text_edit::{
     delete_char_before, delete_word_before, next_char_boundary, prev_char_boundary,
 };
+
+const WHEEL_LINES: usize = 3;
+
+/// Routes a crossterm mouse event. Drags are intentionally unhandled so users
+/// can hold the terminal's bypass modifier (commonly Shift or Option/Alt) to
+/// fall back to native text selection for copy.
+pub fn handle_mouse_event(app: &mut App, event: MouseEvent) {
+    let pos = Position::new(event.column, event.row);
+    match event.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let action = if matches!(event.kind, MouseEventKind::ScrollUp) {
+                Action::MouseScrollUp(WHEEL_LINES)
+            } else {
+                Action::MouseScrollDown(WHEEL_LINES)
+            };
+            let over_file_list = app.file_list_area.is_some_and(|r| r.contains(pos));
+            let over_diff = app.diff_area.is_some_and(|r| r.contains(pos));
+            match app.input_mode {
+                InputMode::Help => handle_help_action(app, action),
+                InputMode::Normal if over_file_list => handle_file_list_action(app, action),
+                InputMode::Normal if over_diff => handle_diff_action(app, action),
+                _ => {}
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if app.input_mode == InputMode::Normal => {
+            handle_left_click(app, pos);
+        }
+        _ => {}
+    }
+}
+
+fn handle_left_click(app: &mut App, pos: Position) {
+    if app.file_list_inner_area.is_some_and(|r| r.contains(pos))
+        && let Some(idx) = app.file_list_idx_at_screen_row(pos.y)
+    {
+        app.focused_panel = FocusedPanel::FileList;
+        app.file_list_state.select(idx);
+        if let Some(item) = app.build_visible_items().get(idx).cloned() {
+            match item {
+                FileTreeItem::Directory { path, .. } => app.toggle_directory(&path),
+                FileTreeItem::File { file_idx, .. } => {
+                    app.jump_to_file(file_idx);
+                    app.focused_panel = FocusedPanel::Diff;
+                }
+            }
+        }
+        return;
+    }
+
+    if app.diff_inner_area.is_some_and(|r| r.contains(pos))
+        && let Some(idx) = app.diff_annotation_at_screen_row(pos.y)
+    {
+        app.focused_panel = FocusedPanel::Diff;
+        app.move_cursor_to_annotation(idx);
+    }
+}
 
 /// Export review: either to clipboard or set pending stdout output based on app.output_to_stdout.
 /// When output_to_stdout is true, stores the content and sets should_quit.
@@ -141,6 +201,8 @@ pub fn handle_help_action(app: &mut App, action: Action) {
         Action::PageUp => app.help_scroll_up(app.help_state.viewport_height),
         Action::GoToTop => app.help_scroll_to_top(),
         Action::GoToBottom => app.help_scroll_to_bottom(),
+        Action::MouseScrollDown(n) => app.help_scroll_down(n),
+        Action::MouseScrollUp(n) => app.help_scroll_up(n),
         Action::ToggleHelp => app.toggle_help(),
         Action::Quit => app.should_quit = true,
         _ => {}
@@ -222,11 +284,20 @@ pub fn handle_command_action(app: &mut App, action: Action) {
                     Err(e) => app.set_error(format!("Save failed: {e}")),
                 },
                 "e" | "reload" => match app.reload_diff_files() {
-                    Ok(count) => app.set_message(format!("Reloaded {count} files")),
+                    Ok((count, invalidated)) => {
+                        if invalidated > 0 {
+                            app.set_message(format!(
+                                "Reloaded {count} files, {invalidated} changed since last review"
+                            ));
+                        } else {
+                            app.set_message(format!("Reloaded {count} files"));
+                        }
+                    }
                     Err(e) => app.set_error(format!("Reload failed: {e}")),
                 },
                 "clip" | "export" => handle_export(app),
-                "clear" => app.clear_all_comments(),
+                "clear" => app.clear_comments(ClearScope::CommentsAndReviewed),
+                "clearc" => app.clear_comments(ClearScope::CommentsOnly),
                 "version" => {
                     app.set_message(format!("tuicr v{}", env!("CARGO_PKG_VERSION")));
                 }
@@ -278,6 +349,7 @@ pub fn handle_command_action(app: &mut App, action: Action) {
                     app.set_message(format!("Commit selector: {status}"));
                 }
                 "diff" => app.toggle_diff_view_mode(),
+                "stage" => app.stage_reviewed_files(),
                 "commits" => {
                     if let Err(e) = app.enter_commit_select_mode() {
                         app.set_error(format!("Failed to load commits: {e}"));
@@ -301,26 +373,24 @@ pub fn handle_search_action(app: &mut App, action: Action) {
         Action::DeleteChar => {
             app.search_buffer.pop();
         }
-        Action::DeleteWord => {
-            if !app.search_buffer.is_empty() {
-                while app
-                    .search_buffer
-                    .chars()
-                    .last()
-                    .map(|c| c.is_whitespace())
-                    .unwrap_or(false)
-                {
-                    app.search_buffer.pop();
-                }
-                while app
-                    .search_buffer
-                    .chars()
-                    .last()
-                    .map(|c| !c.is_whitespace())
-                    .unwrap_or(false)
-                {
-                    app.search_buffer.pop();
-                }
+        Action::DeleteWord if !app.search_buffer.is_empty() => {
+            while app
+                .search_buffer
+                .chars()
+                .last()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(false)
+            {
+                app.search_buffer.pop();
+            }
+            while app
+                .search_buffer
+                .chars()
+                .last()
+                .map(|c| !c.is_whitespace())
+                .unwrap_or(false)
+            {
+                app.search_buffer.pop();
             }
         }
         Action::ClearLine => {
@@ -445,6 +515,9 @@ pub fn handle_commit_select_action(app: &mut App, action: Action) {
             }
         }
         Action::ExitMode => {
+            if app.commit_selection_range.is_none() {
+                return;
+            }
             if let Err(e) = app.exit_commit_select_mode() {
                 app.set_error(format!("Failed to reload changes: {e}"));
             }
@@ -517,6 +590,8 @@ pub fn handle_file_list_action(app: &mut App, action: Action) {
         Action::CursorUp(n) => app.file_list_up(n),
         Action::ScrollLeft(n) => app.file_list_state.scroll_left(n),
         Action::ScrollRight(n) => app.file_list_state.scroll_right(n),
+        Action::MouseScrollDown(n) => app.file_list_viewport_scroll_down(n),
+        Action::MouseScrollUp(n) => app.file_list_viewport_scroll_up(n),
         Action::SelectFile | Action::ToggleExpand => {
             if let Some(item) = app.get_selected_tree_item() {
                 match item {
@@ -544,8 +619,12 @@ pub fn handle_diff_action(app: &mut App, action: Action) {
     match action {
         Action::CursorDown(n) => app.cursor_down(n),
         Action::CursorUp(n) => app.cursor_up(n),
+        Action::ScrollViewDown(n) => app.scroll_view_down(n),
+        Action::ScrollViewUp(n) => app.scroll_view_up(n),
         Action::ScrollLeft(n) => app.scroll_left(n),
         Action::ScrollRight(n) => app.scroll_right(n),
+        Action::MouseScrollDown(n) => app.scroll_view_down(n),
+        Action::MouseScrollUp(n) => app.scroll_view_up(n),
         Action::SelectFile => {
             if let Some(hit) = app.get_gap_at_cursor() {
                 match hit {
@@ -653,10 +732,8 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
             }
         }
         Action::AddFileComment => app.enter_comment_mode(true, None),
-        Action::EditComment => {
-            if !app.enter_edit_mode() {
-                app.set_message("No comment at cursor");
-            }
+        Action::EditComment if !app.enter_edit_mode() => {
+            app.set_message("No comment at cursor");
         }
         Action::ExportToClipboard => handle_export(app),
         Action::SearchNext => {
@@ -672,20 +749,16 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
                 app.set_message("Move cursor to a diff line to start visual selection");
             }
         }
-        Action::CycleCommitNext => {
-            if app.has_inline_commit_selector() {
-                app.cycle_commit_next();
-                if let Err(e) = app.reload_inline_selection() {
-                    app.set_error(format!("Failed to load diff: {e}"));
-                }
+        Action::CycleCommitNext if app.has_inline_commit_selector() => {
+            app.cycle_commit_next();
+            if let Err(e) = app.reload_inline_selection() {
+                app.set_error(format!("Failed to load diff: {e}"));
             }
         }
-        Action::CycleCommitPrev => {
-            if app.has_inline_commit_selector() {
-                app.cycle_commit_prev();
-                if let Err(e) = app.reload_inline_selection() {
-                    app.set_error(format!("Failed to load diff: {e}"));
-                }
+        Action::CycleCommitPrev if app.has_inline_commit_selector() => {
+            app.cycle_commit_prev();
+            if let Err(e) = app.reload_inline_selection() {
+                app.set_error(format!("Failed to load diff: {e}"));
             }
         }
         _ => {}

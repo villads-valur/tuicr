@@ -7,8 +7,8 @@ use ratatui::style::Color;
 use crate::config::CommentTypeConfig;
 use crate::error::{Result, TuicrError};
 use crate::model::{
-    Comment, CommentType, DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin, LineRange,
-    LineSide, ReviewSession, SessionDiffSource,
+    ClearScope, Comment, CommentType, DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin,
+    LineRange, LineSide, ReviewSession, SessionDiffSource,
 };
 use crate::persistence::load_latest_session_for_context;
 use crate::syntax::SyntaxHighlighter;
@@ -139,6 +139,24 @@ pub enum FindSourceLineResult {
     Nearest(usize),
     /// No matching lines found in the current file at all.
     NotFound,
+}
+
+pub fn annotation_file_idx(annotation: &AnnotatedLine) -> Option<usize> {
+    match annotation {
+        AnnotatedLine::FileHeader { file_idx }
+        | AnnotatedLine::FileComment { file_idx, .. }
+        | AnnotatedLine::HunkHeader { file_idx, .. }
+        | AnnotatedLine::DiffLine { file_idx, .. }
+        | AnnotatedLine::SideBySideLine { file_idx, .. }
+        | AnnotatedLine::LineComment { file_idx, .. }
+        | AnnotatedLine::BinaryOrEmpty { file_idx } => Some(*file_idx),
+        AnnotatedLine::ReviewCommentsHeader
+        | AnnotatedLine::ReviewComment { .. }
+        | AnnotatedLine::Expander { .. }
+        | AnnotatedLine::HiddenLines { .. }
+        | AnnotatedLine::ExpandedContext { .. }
+        | AnnotatedLine::Spacing => None,
+    }
 }
 
 /// Search `line_annotations` for the annotation whose `new_lineno` best matches
@@ -297,8 +315,16 @@ pub struct App {
     pub pending_confirm: Option<ConfirmAction>,
     pub supports_keyboard_enhancement: bool,
     pub show_file_list: bool,
+    pub cursor_line_highlight: bool,
     pub file_list_area: Option<ratatui::layout::Rect>,
     pub diff_area: Option<ratatui::layout::Rect>,
+    /// Inner content rect of the file list panel; populated during render.
+    pub file_list_inner_area: Option<ratatui::layout::Rect>,
+    /// Inner content rect of the diff panel; populated during render.
+    pub diff_inner_area: Option<ratatui::layout::Rect>,
+    /// Visual-row -> annotation-index map for the diff viewport. Wrapped
+    /// logical lines repeat their annotation index across multiple rows.
+    pub diff_row_to_annotation: Vec<usize>,
     pub expanded_dirs: HashSet<String>,
     /// Stores lines expanded downward from the upper boundary of each gap
     pub expanded_top: HashMap<GapId, Vec<DiffLine>>,
@@ -313,6 +339,13 @@ pub struct App {
     /// Calculated screen position for comment input cursor (col, row) for IME positioning.
     /// Set during render when in Comment mode, None otherwise.
     pub comment_cursor_screen_pos: Option<(u16, u16)>,
+    /// During render, the comment input box may introduce lines that have no corresponding
+    /// entry in `line_annotations`. This field stores `(box_start, box_len, annotations_replaced)`
+    /// where `box_start` is the absolute rendered line index where the input box begins,
+    /// `box_len` is the number of rendered lines the input box occupies, and
+    /// `annotations_replaced` is how many annotation entries exist for the comment being
+    /// edited (0 for a new comment). Used by `is_line_highlighted` to adjust annotation lookups.
+    pub comment_input_annotation_offset: Option<(usize, usize, usize)>,
     /// Information about available updates (set by background check)
     pub update_info: Option<UpdateInfo>,
     /// Accumulated digit count for {N}G jump-to-line
@@ -481,7 +514,7 @@ impl App {
             );
 
             for file in &pr_diff.files {
-                session.add_file(file.display_path().clone(), file.status);
+                session.add_file(file.display_path().clone(), file.status, file.content_hash);
             }
 
             return Self::build(
@@ -775,7 +808,7 @@ impl App {
     ) -> Result<Self> {
         // Ensure all diff files are registered in the session
         for file in &diff_files {
-            session.add_file(file.display_path().clone(), file.status);
+            session.add_file(file.display_path().clone(), file.status, file.content_hash);
         }
 
         let has_more_commit = commit_list.len() >= VISIBLE_COMMIT_COUNT;
@@ -829,8 +862,12 @@ impl App {
             pending_confirm: None,
             supports_keyboard_enhancement: false,
             show_file_list: true,
+            cursor_line_highlight: true,
             file_list_area: None,
             diff_area: None,
+            file_list_inner_area: None,
+            diff_inner_area: None,
+            diff_row_to_annotation: Vec::new(),
             expanded_dirs: HashSet::new(),
             expanded_top: HashMap::new(),
             expanded_bottom: HashMap::new(),
@@ -838,6 +875,7 @@ impl App {
             output_to_stdout,
             pending_stdout_output: None,
             comment_cursor_screen_pos: None,
+            comment_input_annotation_offset: None,
             update_info: None,
             pending_count: None,
             review_commits: Vec::new(),
@@ -1167,25 +1205,31 @@ impl App {
             })
             .collect();
         let line_count = diff_lines.len() as u32;
+        let hunks = vec![DiffHunk {
+            header: String::new(),
+            lines: diff_lines,
+            old_start: 0,
+            old_count: 0,
+            new_start: 1,
+            new_count: line_count,
+        }];
+        let content_hash = DiffFile::compute_content_hash(&hunks);
         let commit_msg_file = DiffFile {
             old_path: None,
             new_path: Some(PathBuf::from("Commit Message")),
             status: FileStatus::Added,
-            hunks: vec![DiffHunk {
-                header: String::new(),
-                lines: diff_lines,
-                old_start: 0,
-                old_count: 0,
-                new_start: 1,
-                new_count: line_count,
-            }],
+            hunks,
             is_binary: false,
             is_too_large: false,
             is_commit_message: true,
+            content_hash,
         };
         self.diff_files.insert(0, commit_msg_file);
-        self.session
-            .add_file(PathBuf::from("Commit Message"), FileStatus::Added);
+        self.session.add_file(
+            PathBuf::from("Commit Message"),
+            FileStatus::Added,
+            content_hash,
+        );
     }
 
     fn is_staged_commit(commit: &CommitInfo) -> bool {
@@ -1341,7 +1385,7 @@ impl App {
             Self::load_or_create_session(&self.vcs_info, SessionDiffSource::StagedAndUnstaged);
         for file in &diff_files {
             let path = file.display_path().clone();
-            self.session.add_file(path, file.status);
+            self.session.add_file(path, file.status, file.content_hash);
         }
 
         self.diff_files = diff_files;
@@ -1376,7 +1420,7 @@ impl App {
         self.session = Self::load_or_create_session(&self.vcs_info, SessionDiffSource::Staged);
         for file in &diff_files {
             let path = file.display_path().clone();
-            self.session.add_file(path, file.status);
+            self.session.add_file(path, file.status, file.content_hash);
         }
 
         self.diff_files = diff_files;
@@ -1411,7 +1455,7 @@ impl App {
         self.session = Self::load_or_create_session(&self.vcs_info, SessionDiffSource::Unstaged);
         for file in &diff_files {
             let path = file.display_path().clone();
-            self.session.add_file(path, file.status);
+            self.session.add_file(path, file.status, file.content_hash);
         }
 
         self.diff_files = diff_files;
@@ -1427,7 +1471,9 @@ impl App {
         Ok(())
     }
 
-    pub fn reload_diff_files(&mut self) -> Result<usize> {
+    /// Reloads diff files from disk. Returns `(file_count, invalidated_count)` where
+    /// `invalidated_count` is the number of previously reviewed files whose content changed.
+    pub fn reload_diff_files(&mut self) -> Result<(usize, usize)> {
         let current_path = self.current_file_path().cloned();
         let prev_file_idx = self.diff_state.current_file_idx;
         let prev_cursor_line = self.diff_state.cursor_line;
@@ -1498,9 +1544,12 @@ impl App {
             }
         };
 
+        let mut invalidated = 0;
         for file in &diff_files {
             let path = file.display_path().clone();
-            self.session.add_file(path, file.status);
+            if self.session.add_file(path, file.status, file.content_hash) {
+                invalidated += 1;
+            }
         }
 
         self.diff_files = diff_files;
@@ -1551,7 +1600,48 @@ impl App {
         }
 
         self.rebuild_annotations();
-        Ok(self.diff_files.len())
+        Ok((self.diff_files.len(), invalidated))
+    }
+
+    pub fn can_stage(&self) -> bool {
+        matches!(
+            self.diff_source,
+            DiffSource::Unstaged | DiffSource::StagedAndUnstaged
+        )
+    }
+
+    pub fn stage_reviewed_files(&mut self) {
+        if !self.can_stage() {
+            self.set_error("Staging only available when viewing unstaged diffs");
+            return;
+        }
+        let reviewed_paths: Vec<_> = self
+            .session
+            .files
+            .iter()
+            .filter(|(_, review)| review.reviewed)
+            .map(|(path, _)| path.clone())
+            .collect();
+        if reviewed_paths.is_empty() {
+            self.set_warning("No reviewed files to stage");
+            return;
+        }
+        let mut staged = 0;
+        for path in &reviewed_paths {
+            if let Err(e) = self.vcs.stage_file(path) {
+                self.set_error(format!("Failed to stage {}: {e}", path.display()));
+                return;
+            }
+            staged += 1;
+        }
+        self.set_message(format!("Staged {} reviewed file(s)", staged));
+        if let Err(TuicrError::NoChanges) = self.reload_diff_files() {
+            self.diff_files.clear();
+            self.diff_state = DiffState::default();
+            self.file_list_state = FileListState::default();
+            self.clear_expanded_gaps();
+            self.rebuild_annotations();
+        }
     }
 
     pub fn current_file(&self) -> Option<&DiffFile> {
@@ -1667,6 +1757,29 @@ impl App {
         self.diff_state.scroll_offset = self.diff_state.scroll_offset.saturating_sub(lines);
         self.ensure_cursor_visible();
         self.update_current_file_from_cursor();
+    }
+
+    pub fn scroll_view_down(&mut self, lines: usize) {
+        let max_scroll = self.max_scroll_offset();
+        self.diff_state.scroll_offset = (self.diff_state.scroll_offset + lines).min(max_scroll);
+        if self.diff_state.cursor_line < self.diff_state.scroll_offset {
+            self.diff_state.cursor_line = self.diff_state.scroll_offset;
+            self.update_current_file_from_cursor();
+        }
+    }
+
+    pub fn scroll_view_up(&mut self, lines: usize) {
+        self.diff_state.scroll_offset = self.diff_state.scroll_offset.saturating_sub(lines);
+        let visible_lines = if self.diff_state.visible_line_count > 0 {
+            self.diff_state.visible_line_count
+        } else {
+            self.diff_state.viewport_height.max(1)
+        };
+        let bottom = self.diff_state.scroll_offset + visible_lines.saturating_sub(1);
+        if self.diff_state.cursor_line > bottom {
+            self.diff_state.cursor_line = bottom;
+            self.update_current_file_from_cursor();
+        }
     }
 
     pub fn scroll_left(&mut self, cols: usize) {
@@ -1973,6 +2086,73 @@ impl App {
     pub fn file_list_up(&mut self, n: usize) {
         let new_idx = self.file_list_state.selected().saturating_sub(n);
         self.file_list_state.select(new_idx);
+    }
+
+    /// Scroll the file-list viewport down by `lines` without moving the
+    /// selection unless it would fall off the top of the viewport.
+    pub fn file_list_viewport_scroll_down(&mut self, lines: usize) {
+        let total = self.build_visible_items().len();
+        let viewport = self.file_list_state.viewport_height.max(1);
+        let max_offset = total.saturating_sub(viewport);
+        let new_offset = (self.file_list_state.list_state.offset() + lines).min(max_offset);
+        *self.file_list_state.list_state.offset_mut() = new_offset;
+        if self.file_list_state.selected() < new_offset {
+            self.file_list_state.select(new_offset);
+        }
+    }
+
+    /// Scroll the file-list viewport up by `lines` without moving the
+    /// selection unless it would fall off the bottom of the viewport.
+    pub fn file_list_viewport_scroll_up(&mut self, lines: usize) {
+        let viewport = self.file_list_state.viewport_height.max(1);
+        let new_offset = self
+            .file_list_state
+            .list_state
+            .offset()
+            .saturating_sub(lines);
+        *self.file_list_state.list_state.offset_mut() = new_offset;
+        let max_visible = (new_offset + viewport).saturating_sub(1);
+        if self.file_list_state.selected() > max_visible {
+            self.file_list_state.select(max_visible);
+        }
+    }
+
+    pub fn diff_annotation_at_screen_row(&self, screen_row: u16) -> Option<usize> {
+        let inner = self.diff_inner_area?;
+        if screen_row < inner.y || screen_row >= inner.y + inner.height {
+            return None;
+        }
+        let rel = (screen_row - inner.y) as usize;
+        self.diff_row_to_annotation.get(rel).copied()
+    }
+
+    pub fn file_list_idx_at_screen_row(&self, screen_row: u16) -> Option<usize> {
+        let inner = self.file_list_inner_area?;
+        if screen_row < inner.y || screen_row >= inner.y + inner.height {
+            return None;
+        }
+        let rel = (screen_row - inner.y) as usize;
+        let idx = self.file_list_state.list_state.offset() + rel;
+        let total = self.build_visible_items().len();
+        (idx < total).then_some(idx)
+    }
+
+    /// Syncs `current_file_idx` so the file list selection follows when the
+    /// new cursor lands on an annotation belonging to a file.
+    pub fn move_cursor_to_annotation(&mut self, idx: usize) {
+        if idx >= self.line_annotations.len() {
+            return;
+        }
+        self.diff_state.cursor_line = idx;
+        if let Some(file_idx) = annotation_file_idx(&self.line_annotations[idx]) {
+            self.diff_state.current_file_idx = file_idx;
+        }
+        let viewport = self.diff_state.viewport_height.max(1);
+        if idx < self.diff_state.scroll_offset {
+            self.diff_state.scroll_offset = idx;
+        } else if idx >= self.diff_state.scroll_offset + viewport {
+            self.diff_state.scroll_offset = idx + 1 - viewport;
+        }
     }
 
     pub fn jump_to_file(&mut self, idx: usize) {
@@ -2471,14 +2651,14 @@ impl App {
         let location = self.find_comment_at_cursor();
 
         match location {
-            Some(CommentLocation::Review { index }) => {
-                if index < self.session.review_comments.len() {
-                    self.session.review_comments.remove(index);
-                    self.dirty = true;
-                    self.set_message("Review comment deleted");
-                    self.rebuild_annotations();
-                    return true;
-                }
+            Some(CommentLocation::Review { index })
+                if index < self.session.review_comments.len() =>
+            {
+                self.session.review_comments.remove(index);
+                self.dirty = true;
+                self.set_message("Review comment deleted");
+                self.rebuild_annotations();
+                return true;
             }
             Some(CommentLocation::File { path, index }) => {
                 if let Some(review) = self.session.get_file_mut(&path) {
@@ -2523,14 +2703,14 @@ impl App {
                     }
                 }
             }
-            None => {}
+            Some(CommentLocation::Review { .. }) | None => {}
         }
 
         false
     }
 
-    pub fn clear_all_comments(&mut self) {
-        let (cleared, unreviewed) = self.session.clear_comments();
+    pub fn clear_comments(&mut self, scope: ClearScope) {
+        let (cleared, unreviewed) = self.session.clear_comments(scope);
         if cleared == 0 && unreviewed == 0 {
             self.set_message("No comments to clear");
             return;
@@ -2967,7 +3147,7 @@ impl App {
         );
 
         for file in &pr_diff.files {
-            session.add_file(file.display_path().clone(), file.status);
+            session.add_file(file.display_path().clone(), file.status, file.content_hash);
         }
 
         self.session = session;
@@ -3043,7 +3223,7 @@ impl App {
                     // Update session for new files
                     for file in &self.diff_files {
                         let path = file.display_path().clone();
-                        self.session.add_file(path, file.status);
+                        self.session.add_file(path, file.status, file.content_hash);
                     }
 
                     self.sort_files_by_directory(true);
@@ -3373,7 +3553,7 @@ impl App {
         // Add files to session
         for file in &diff_files {
             let path = file.display_path().clone();
-            self.session.add_file(path, file.status);
+            self.session.add_file(path, file.status, file.content_hash);
         }
 
         // Update app state
@@ -3577,7 +3757,7 @@ impl App {
 
         for file in &diff_files {
             let path = file.display_path().clone();
-            self.session.add_file(path, file.status);
+            self.session.add_file(path, file.status, file.content_hash);
         }
 
         self.diff_files = diff_files;
@@ -4307,6 +4487,7 @@ mod tree_tests {
             is_binary: false,
             is_too_large: false,
             is_commit_message: false,
+            content_hash: 0,
         }
     }
 
@@ -5020,6 +5201,7 @@ mod expand_gap_tests {
     }
 
     fn make_file_with_hunks(path: &str, hunks: Vec<DiffHunk>) -> DiffFile {
+        let content_hash = DiffFile::compute_content_hash(&hunks);
         DiffFile {
             old_path: None,
             new_path: Some(PathBuf::from(path)),
@@ -5028,6 +5210,7 @@ mod expand_gap_tests {
             is_binary: false,
             is_too_large: false,
             is_commit_message: false,
+            content_hash,
         }
     }
 

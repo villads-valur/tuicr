@@ -156,6 +156,13 @@ pub trait VcsBackend: Send {
             "PR diff not supported for this VCS".into(),
         ))
     }
+
+    /// Stage a file (add to index).
+    fn stage_file(&self, _path: &Path) -> Result<()> {
+        Err(crate::error::TuicrError::UnsupportedOperation(
+            "Staging not supported for this VCS".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
