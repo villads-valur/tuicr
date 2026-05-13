@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub theme_dark: Option<String>,
     pub theme_light: Option<String>,
     pub appearance: Option<String>,
+    pub backend: Option<String>,
     pub comment_types: Option<Vec<CommentTypeConfig>>,
     pub show_file_list: Option<bool>,
     pub diff_view: Option<String>,
@@ -29,6 +30,8 @@ pub struct AppConfig {
     pub export_legend: Option<bool>,
     pub cursor_line: Option<bool>,
     pub mouse: Option<bool>,
+    pub transparent_background: Option<bool>,
+    pub scroll_offset: Option<usize>,
 }
 
 /// Known top-level config keys. Used to warn about typos.
@@ -37,6 +40,7 @@ const KNOWN_KEYS: &[&str] = &[
     "theme_dark",
     "theme_light",
     "appearance",
+    "backend",
     "comment_types",
     "show_file_list",
     "diff_view",
@@ -44,6 +48,8 @@ const KNOWN_KEYS: &[&str] = &[
     "export_legend",
     "cursor_line",
     "mouse",
+    "transparent_background",
+    "scroll_offset",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -129,6 +135,27 @@ fn read_bool(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -> Opti
     }
 }
 
+/// Read a non-negative integer value from the table, pushing a warning if the type is wrong.
+fn read_usize(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -> Option<usize> {
+    let val = table.get(key)?;
+    if let Some(n) = val.as_integer() {
+        if n >= 0 {
+            Some(n as usize)
+        } else {
+            warnings.push(format!(
+                "Warning: Config key '{key}' must be a non-negative integer; ignoring value"
+            ));
+            None
+        }
+    } else {
+        warnings.push(format!(
+            "Warning: Config key '{key}' must be an integer; got '{}', ignoring",
+            val
+        ));
+        None
+    }
+}
+
 /// Read a string value constrained to a set of allowed values.
 fn read_enum(
     table: &toml::Table,
@@ -171,6 +198,7 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         theme_dark: read_string(table, "theme_dark", &mut warnings),
         theme_light: read_string(table, "theme_light", &mut warnings),
         appearance: read_string(table, "appearance", &mut warnings),
+        backend: read_enum(table, "backend", &["libgit2", "cli"], &mut warnings),
         comment_types: table
             .get("comment_types")
             .and_then(|v| parse_comment_types(v, &mut warnings)),
@@ -185,6 +213,8 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         export_legend: read_bool(table, "export_legend", &mut warnings),
         cursor_line: read_bool(table, "cursor_line", &mut warnings),
         mouse: read_bool(table, "mouse", &mut warnings),
+        transparent_background: read_bool(table, "transparent_background", &mut warnings),
+        scroll_offset: read_usize(table, "scroll_offset", &mut warnings),
     };
 
     for key in table.keys() {
@@ -418,6 +448,48 @@ mod tests {
     }
 
     #[test]
+    fn should_parse_backend_option() {
+        let cli = parse_config("backend = \"cli\"\n");
+        assert_eq!(
+            cli.config.as_ref().and_then(|cfg| cfg.backend.as_deref()),
+            Some("cli")
+        );
+        assert!(cli.warnings.is_empty());
+
+        let libgit2 = parse_config("backend = \"libgit2\"\n");
+        assert_eq!(
+            libgit2
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.backend.as_deref()),
+            Some("libgit2")
+        );
+        assert!(libgit2.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_and_ignore_invalid_backend_option() {
+        let outcome = parse_config("backend = \"gitoxide\"\n");
+        assert_eq!(outcome.config, Some(AppConfig::default()));
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            outcome.warnings[0],
+            "Warning: Config key 'backend' must be \"libgit2\" or \"cli\"; got \"gitoxide\", ignoring"
+        );
+    }
+
+    #[test]
+    fn should_warn_and_ignore_backend_with_invalid_type() {
+        let outcome = parse_config("backend = true\n");
+        assert_eq!(outcome.config, Some(AppConfig::default()));
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            outcome.warnings[0],
+            "Warning: Config key 'backend' must be a string; ignoring value"
+        );
+    }
+
+    #[test]
     fn should_parse_empty_config_as_defaults() {
         let outcome = parse_config("");
         assert_eq!(outcome.config, Some(AppConfig::default()));
@@ -639,6 +711,28 @@ mod tests {
             outcome.config.as_ref().and_then(|cfg| cfg.export_legend),
             None
         );
+    }
+
+    // scroll_offset
+
+    #[test]
+    fn should_parse_scroll_offset() {
+        let outcome = parse_config("scroll_offset = 4\n");
+        assert_eq!(
+            outcome.config.as_ref().and_then(|cfg| cfg.scroll_offset),
+            Some(4)
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_and_ignore_scroll_offset_with_invalid_type() {
+        let outcome = parse_config("scroll_offset = \"four\"\n");
+        assert_eq!(
+            outcome.config.as_ref().and_then(|cfg| cfg.scroll_offset),
+            None
+        );
+        assert_eq!(outcome.warnings.len(), 1);
     }
 
     // comment_types

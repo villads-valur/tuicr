@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use ratatui::style::Color;
@@ -15,7 +16,9 @@ use crate::syntax::SyntaxHighlighter;
 use crate::theme::Theme;
 use crate::update::UpdateInfo;
 use crate::vcs::git::calculate_gap;
-use crate::vcs::{CommitInfo, FileBackend, VcsBackend, VcsInfo, detect_vcs};
+use crate::vcs::{
+    CommitInfo, FileBackend, GitBackendPreference, VcsBackend, VcsChangeStatus, VcsInfo, detect_vcs,
+};
 
 const VISIBLE_COMMIT_COUNT: usize = 10;
 const COMMIT_PAGE_SIZE: usize = 10;
@@ -24,6 +27,25 @@ pub const UNSTAGED_SELECTION_ID: &str = "__tuicr_unstaged__";
 pub const GAP_EXPAND_BATCH: usize = 20;
 
 /// Count how many annotation lines a gap produces (expanders + hidden count).
+/// `hi_char = None` means slice to the end.
+fn char_slice(s: &str, lo_char: usize, hi_char: Option<usize>) -> &str {
+    let mut indices = s.char_indices();
+    let lo_byte = indices
+        .by_ref()
+        .nth(lo_char)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len());
+    let hi_byte = match hi_char {
+        None => s.len(),
+        Some(hi) if hi <= lo_char => return "",
+        Some(hi) => indices
+            .nth(hi - lo_char - 1)
+            .map(|(b, _)| b)
+            .unwrap_or(s.len()),
+    };
+    &s[lo_byte..hi_byte]
+}
+
 fn gap_annotation_line_count(is_top_of_file: bool, remaining: usize) -> usize {
     if remaining == 0 {
         0
@@ -33,6 +55,27 @@ fn gap_annotation_line_count(is_top_of_file: bool, remaining: usize) -> usize {
     } else {
         // Between hunks: ↓ + HiddenLines + ↑ when >= batch, else single ↕
         if remaining >= GAP_EXPAND_BATCH { 3 } else { 1 }
+    }
+}
+
+fn profile_diff_result(result: &Result<Vec<DiffFile>>) -> String {
+    match result {
+        Ok(files) => format!("files={}", files.len()),
+        Err(e) => format!("error={e}"),
+    }
+}
+
+fn profile_commit_result(result: &Result<Vec<CommitInfo>>) -> String {
+    match result {
+        Ok(commits) => format!("commits={}", commits.len()),
+        Err(e) => format!("error={e}"),
+    }
+}
+
+fn profile_unit_result(result: &Result<()>) -> String {
+    match result {
+        Ok(()) => "result=ok".to_string(),
+        Err(e) => format!("error={e}"),
     }
 }
 
@@ -66,6 +109,72 @@ pub enum ExpandDirection {
     Up,
     /// ↕ Expand all remaining lines in both directions (merged expander)
     Both,
+}
+
+/// Unified diff gutter: 1 (cursor indicator) + 5 (line_num + space) + 2 (prefix + space).
+pub const UNIFIED_GUTTER: u16 = 8;
+/// Side-by-side leading width before Old content: indicator(1) + lineno(4) + space(1) + prefix(1).
+pub const SBS_LEFT_GUTTER: u16 = 7;
+/// Side-by-side fixed overhead (both gutters + " │ " divider). The two content
+/// panes share what's left of the inner width equally.
+pub const SBS_OVERHEAD: u16 = 16;
+
+/// X-coords of one diff content pane. SBS has Old and New; Unified has one.
+#[derive(Debug, Clone, Copy)]
+pub struct PaneGeom {
+    pub content_x_start: u16,
+    pub content_x_end: u16,
+    pub content_width: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelPoint {
+    pub annotation_idx: usize,
+    pub char_offset: usize,
+    pub side: LineSide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualSelection {
+    pub anchor: SelPoint,
+    pub head: SelPoint,
+}
+
+impl VisualSelection {
+    pub fn collapsed(point: SelPoint) -> Self {
+        Self {
+            anchor: point,
+            head: point,
+        }
+    }
+
+    pub fn ordered(&self) -> (SelPoint, SelPoint) {
+        if (self.anchor.annotation_idx, self.anchor.char_offset)
+            <= (self.head.annotation_idx, self.head.char_offset)
+        {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// Char range `[lo, hi)` of `total_chars` covered by this selection on the
+    /// annotation `ann_idx`. Returns `(0, total_chars)` for annotations
+    /// strictly between start and end.
+    pub fn char_range(&self, ann_idx: usize, total_chars: usize) -> (usize, usize) {
+        let (start, end) = self.ordered();
+        let lo = if ann_idx == start.annotation_idx {
+            start.char_offset.min(total_chars)
+        } else {
+            0
+        };
+        let hi = if ann_idx == end.annotation_idx {
+            end.char_offset.min(total_chars)
+        } else {
+            total_chars
+        };
+        (lo, hi)
+    }
 }
 
 /// Result of checking what the cursor is on in a gap region
@@ -139,6 +248,26 @@ pub enum FindSourceLineResult {
     Nearest(usize),
     /// No matching lines found in the current file at all.
     NotFound,
+}
+
+/// Best-guess side for an annotation: New for everything except a Side-by-Side
+/// line that only has an Old number (a deletion). Mouse cells outside content
+/// annotations get New as a harmless default; range-comment line resolution
+/// later filters non-diff annotations anyway.
+pub fn annotation_side_default(annotation: &AnnotatedLine) -> LineSide {
+    match annotation {
+        AnnotatedLine::SideBySideLine {
+            new_lineno: None,
+            old_lineno: Some(_),
+            ..
+        } => LineSide::Old,
+        AnnotatedLine::DiffLine {
+            new_lineno: None,
+            old_lineno: Some(_),
+            ..
+        } => LineSide::Old,
+        _ => LineSide::New,
+    }
 }
 
 pub fn annotation_file_idx(annotation: &AnnotatedLine) -> Option<usize> {
@@ -261,7 +390,12 @@ pub enum MessageType {
 pub struct Message {
     pub content: String,
     pub message_type: MessageType,
+    /// When this message should be auto-cleared. `None` means sticky.
+    pub expires_at: Option<Instant>,
 }
+
+const MESSAGE_TTL_INFO: Duration = Duration::from_secs(3);
+const MESSAGE_TTL_WARNING: Duration = Duration::from_secs(5);
 
 pub struct App {
     pub theme: Theme,
@@ -290,8 +424,10 @@ pub struct App {
     pub comment_line: Option<(u32, LineSide)>,
     pub editing_comment_id: Option<String>,
 
-    /// Visual selection anchor point (starting line, side)
-    pub visual_anchor: Option<(u32, LineSide)>,
+    pub visual_selection: Option<VisualSelection>,
+    /// True once the active mouse drag has actually moved off the press cell.
+    /// Lets Up distinguish click from drag-back-to-anchor.
+    pub mouse_drag_active: bool,
     /// Line range for range comments (used when creating comments from visual selection)
     pub comment_line_range: Option<(LineRange, LineSide)>,
 
@@ -316,12 +452,16 @@ pub struct App {
     pub supports_keyboard_enhancement: bool,
     pub show_file_list: bool,
     pub cursor_line_highlight: bool,
+    pub scroll_offset: usize,
     pub file_list_area: Option<ratatui::layout::Rect>,
     pub diff_area: Option<ratatui::layout::Rect>,
     /// Inner content rect of the file list panel; populated during render.
     pub file_list_inner_area: Option<ratatui::layout::Rect>,
     /// Inner content rect of the diff panel; populated during render.
     pub diff_inner_area: Option<ratatui::layout::Rect>,
+    /// Inner content rect of the commit list panel (full-screen picker or inline selector);
+    /// populated during render.
+    pub commit_list_inner_area: Option<ratatui::layout::Rect>,
     /// Visual-row -> annotation-index map for the diff viewport. Wrapped
     /// logical lines repeat their annotation index across multiple rows.
     pub diff_row_to_annotation: Vec<usize>,
@@ -419,6 +559,26 @@ pub struct DiffState {
     pub visible_line_count: usize,
 }
 
+impl DiffState {
+    /// Number of logical lines that fit in the viewport. Uses the render-computed
+    /// `visible_line_count` (which accounts for line wrapping), falling back to
+    /// `viewport_height` before the first render.
+    pub fn effective_visible_lines(&self) -> usize {
+        if self.visible_line_count > 0 {
+            self.visible_line_count
+        } else {
+            self.viewport_height.max(1)
+        }
+    }
+
+    /// Minimum number of lines kept between the cursor and the viewport edge
+    /// (equivalent to vim's `scrolloff`). Must be strictly less than half the
+    /// viewport to guarantee a stable free zone after centering (zz).
+    pub fn effective_scroll_margin(&self, scroll_offset: usize) -> usize {
+        scroll_offset.min((self.effective_visible_lines() / 2).saturating_sub(1))
+    }
+}
+
 impl Default for DiffState {
     fn default() -> Self {
         Self {
@@ -459,21 +619,26 @@ enum CommentLocation {
     },
 }
 
+pub struct AppStartupOptions<'a> {
+    pub revisions: Option<&'a str>,
+    pub pr_mode: bool,
+    pub pr_base_ref: Option<&'a str>,
+    pub working_tree: bool,
+    pub path_filter: Option<&'a str>,
+    pub file_path: Option<&'a str>,
+    pub git_backend_preference: GitBackendPreference,
+}
+
 impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: Theme,
         comment_type_configs: Option<Vec<CommentTypeConfig>>,
         output_to_stdout: bool,
-        revisions: Option<&str>,
-        pr_mode: bool,
-        pr_base_ref: Option<&str>,
-        working_tree: bool,
-        path_filter: Option<&str>,
-        file_path: Option<&str>,
+        options: AppStartupOptions<'_>,
     ) -> Result<Self> {
         // --file mode: open a single file for annotation without VCS
-        if let Some(file_path) = file_path {
+        if let Some(file_path) = options.file_path {
             let vcs = Box::new(FileBackend::new(file_path)?);
             let vcs_info = vcs.info().clone();
             let highlighter = theme.syntax_highlighter();
@@ -501,11 +666,14 @@ impl App {
             return Ok(app);
         }
 
-        let vcs = detect_vcs()?;
+        let vcs = crate::profile::time("startup.detect_vcs", || {
+            detect_vcs(options.git_backend_preference)
+        })?;
         let vcs_info = vcs.info().clone();
-        let highlighter = theme.syntax_highlighter();
-        if pr_mode {
-            let pr_diff = vcs.get_pull_request_diff(pr_base_ref, highlighter)?;
+        let highlighter =
+            crate::profile::time("startup.syntax_highlighter", || theme.syntax_highlighter());
+        if options.pr_mode {
+            let pr_diff = vcs.get_pull_request_diff(options.pr_base_ref, highlighter)?;
             let mut session = ReviewSession::new(
                 vcs_info.root_path.clone(),
                 pr_diff.info.head_commit.clone(),
@@ -533,7 +701,7 @@ impl App {
                 },
                 InputMode::Normal,
                 Vec::new(),
-                path_filter,
+                options.path_filter,
             );
         }
         // Determine the diff source, files, and session based on input.
@@ -542,47 +710,49 @@ impl App {
         //   2. -r only: commit range
         //   3. -w only: working tree directly (skip commit selector)
         //   4. neither: commit selection UI
-        if let Some(revisions) = revisions {
-            let commit_ids = vcs.resolve_revisions(revisions)?;
+        if let Some(revisions) = options.revisions {
+            let commit_ids = crate::profile::time_with(
+                "startup.resolve_revisions",
+                || vcs.resolve_revisions(revisions),
+                |result| match result {
+                    Ok(ids) => format!("commits={}", ids.len()),
+                    Err(e) => format!("error={e}"),
+                },
+            )?;
 
-            if working_tree {
+            if options.working_tree {
                 // Combined: commit range + staged/unstaged changes
                 let diff_files = Self::get_working_tree_with_commits_diff_with_ignore(
                     vcs.as_ref(),
                     &vcs_info.root_path,
                     &commit_ids,
                     highlighter,
-                    path_filter,
+                    options.path_filter,
                 )?;
                 let session = Self::load_or_create_staged_unstaged_and_commits_session(
                     &vcs_info,
                     &commit_ids,
                 );
-                let review_commits: Vec<CommitInfo> = vcs
-                    .get_commits_info(&commit_ids)?
-                    .into_iter()
-                    .rev()
-                    .collect();
+                let review_commits: Vec<CommitInfo> = crate::profile::time_with(
+                    "startup.selected_commit_info",
+                    || vcs.get_commits_info(&commit_ids),
+                    profile_commit_result,
+                )?
+                .into_iter()
+                .rev()
+                .collect();
                 // Prepend staged/unstaged entries only when the backend supports them
-                let has_staged = Self::get_staged_diff_with_ignore(
+                let (change_status, _) = Self::get_change_status_with_ignore(
                     vcs.as_ref(),
                     &vcs_info.root_path,
                     highlighter,
-                    path_filter,
-                )
-                .is_ok();
-                let has_unstaged = Self::get_unstaged_diff_with_ignore(
-                    vcs.as_ref(),
-                    &vcs_info.root_path,
-                    highlighter,
-                    path_filter,
-                )
-                .is_ok();
+                    options.path_filter,
+                )?;
                 let mut all_commits = Vec::new();
-                if has_staged {
+                if change_status.staged {
                     all_commits.push(Self::staged_commit_entry());
                 }
-                if has_unstaged {
+                if change_status.unstaged {
                     all_commits.push(Self::unstaged_commit_entry());
                 }
                 all_commits.extend(review_commits);
@@ -598,7 +768,7 @@ impl App {
                     DiffSource::StagedUnstagedAndCommits(commit_ids),
                     InputMode::Normal,
                     Vec::new(),
-                    path_filter,
+                    options.path_filter,
                 )?;
 
                 app.range_diff_files = Some(app.diff_files.clone());
@@ -629,11 +799,15 @@ impl App {
                 &vcs_info.root_path,
                 &commit_ids,
                 highlighter,
-                path_filter,
+                options.path_filter,
             )?;
             let session = Self::load_or_create_commit_range_session(&vcs_info, &commit_ids);
             // Get commit info for the inline commit selector
-            let review_commits = vcs.get_commits_info(&commit_ids)?;
+            let review_commits = crate::profile::time_with(
+                "startup.selected_commit_info",
+                || vcs.get_commits_info(&commit_ids),
+                profile_commit_result,
+            )?;
             // Reverse to newest-first display order
             let review_commits: Vec<CommitInfo> = review_commits.into_iter().rev().collect();
 
@@ -648,7 +822,7 @@ impl App {
                 DiffSource::CommitRange(commit_ids),
                 InputMode::Normal,
                 Vec::new(),
-                path_filter,
+                options.path_filter,
             )?;
 
             // Set up inline commit selector for multi-commit reviews
@@ -670,13 +844,13 @@ impl App {
             app.rebuild_annotations();
 
             Ok(app)
-        } else if working_tree {
+        } else if options.working_tree {
             // Skip commit selector, go straight to working tree diff
             let diff_files = Self::get_working_tree_diff_with_ignore(
                 vcs.as_ref(),
                 &vcs_info.root_path,
                 highlighter,
-                path_filter,
+                options.path_filter,
             )?;
             let session =
                 Self::load_or_create_session(&vcs_info, SessionDiffSource::StagedAndUnstaged);
@@ -692,51 +866,41 @@ impl App {
                 DiffSource::StagedAndUnstaged,
                 InputMode::Normal,
                 Vec::new(),
-                path_filter,
+                options.path_filter,
             )?;
 
             Ok(app)
         } else {
-            let has_staged_changes = match Self::get_staged_diff_with_ignore(
+            let (change_status, used_backend_status_probe) = Self::get_change_status_with_ignore(
                 vcs.as_ref(),
                 &vcs_info.root_path,
                 highlighter,
-                path_filter,
-            ) {
-                Ok(_) => true,
-                Err(TuicrError::NoChanges) => false,
-                Err(TuicrError::UnsupportedOperation(_)) => false,
-                Err(e) => return Err(e),
-            };
+                options.path_filter,
+            )?;
+            let has_staged_changes = change_status.staged;
+            let has_unstaged_changes = change_status.unstaged;
 
-            let has_unstaged_changes = match Self::get_unstaged_diff_with_ignore(
-                vcs.as_ref(),
-                &vcs_info.root_path,
-                highlighter,
-                path_filter,
-            ) {
-                Ok(_) => true,
-                Err(TuicrError::NoChanges) => false,
-                Err(TuicrError::UnsupportedOperation(_)) => false,
-                Err(e) => return Err(e),
-            };
+            let working_tree_diff =
+                if (has_staged_changes || has_unstaged_changes) && !used_backend_status_probe {
+                    match Self::get_working_tree_diff_with_ignore(
+                        vcs.as_ref(),
+                        &vcs_info.root_path,
+                        highlighter,
+                        options.path_filter,
+                    ) {
+                        Ok(diff_files) => Some(diff_files),
+                        Err(TuicrError::NoChanges) => None,
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    None
+                };
 
-            let working_tree_diff = if has_staged_changes || has_unstaged_changes {
-                match Self::get_working_tree_diff_with_ignore(
-                    vcs.as_ref(),
-                    &vcs_info.root_path,
-                    highlighter,
-                    path_filter,
-                ) {
-                    Ok(diff_files) => Some(diff_files),
-                    Err(TuicrError::NoChanges) => None,
-                    Err(e) => return Err(e),
-                }
-            } else {
-                None
-            };
-
-            let commits = vcs.get_recent_commits(0, VISIBLE_COMMIT_COUNT)?;
+            let commits = crate::profile::time_with(
+                "startup.recent_commits",
+                || vcs.get_recent_commits(0, VISIBLE_COMMIT_COUNT),
+                profile_commit_result,
+            )?;
             if !has_staged_changes && !has_unstaged_changes && commits.is_empty() {
                 return Err(TuicrError::NoChanges);
             }
@@ -782,7 +946,7 @@ impl App {
                 diff_source,
                 InputMode::CommitSelect,
                 commit_list,
-                path_filter,
+                options.path_filter,
             )?;
 
             app.has_more_commit = commits.len() >= VISIBLE_COMMIT_COUNT;
@@ -845,7 +1009,8 @@ impl App {
             comment_is_file_level: true,
             comment_line: None,
             editing_comment_id: None,
-            visual_anchor: None,
+            visual_selection: None,
+            mouse_drag_active: false,
             comment_line_range: None,
             commit_list,
             commit_list_cursor: 0,
@@ -863,10 +1028,12 @@ impl App {
             supports_keyboard_enhancement: false,
             show_file_list: true,
             cursor_line_highlight: true,
+            scroll_offset: 0,
             file_list_area: None,
             diff_area: None,
             file_list_inner_area: None,
             diff_inner_area: None,
+            commit_list_inner_area: None,
             diff_row_to_annotation: Vec::new(),
             expanded_dirs: HashSet::new(),
             expanded_top: HashMap::new(),
@@ -1279,13 +1446,25 @@ impl App {
         Ok(diff_files)
     }
 
+    fn diff_exists(diff_files: Result<Vec<DiffFile>>) -> Result<bool> {
+        match diff_files {
+            Ok(_) => Ok(true),
+            Err(TuicrError::NoChanges) | Err(TuicrError::UnsupportedOperation(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     fn get_working_tree_diff_with_ignore(
         vcs: &dyn VcsBackend,
         repo_root: &Path,
         highlighter: &SyntaxHighlighter,
         path_filter: Option<&str>,
     ) -> Result<Vec<DiffFile>> {
-        let diff_files = vcs.get_working_tree_diff(highlighter)?;
+        let diff_files = crate::profile::time_with(
+            "diff.load_working_tree",
+            || vcs.get_working_tree_diff(highlighter),
+            profile_diff_result,
+        )?;
         let diff_files = Self::filter_ignored_diff_files(repo_root, diff_files);
         let diff_files = if let Some(path) = path_filter {
             Self::filter_by_path(diff_files, path)
@@ -1301,7 +1480,11 @@ impl App {
         highlighter: &SyntaxHighlighter,
         path_filter: Option<&str>,
     ) -> Result<Vec<DiffFile>> {
-        let diff_files = vcs.get_staged_diff(highlighter)?;
+        let diff_files = crate::profile::time_with(
+            "diff.load_staged",
+            || vcs.get_staged_diff(highlighter),
+            profile_diff_result,
+        )?;
         let diff_files = Self::filter_ignored_diff_files(repo_root, diff_files);
         let diff_files = if let Some(path) = path_filter {
             Self::filter_by_path(diff_files, path)
@@ -1317,9 +1500,17 @@ impl App {
         highlighter: &SyntaxHighlighter,
         path_filter: Option<&str>,
     ) -> Result<Vec<DiffFile>> {
-        let diff_files = match vcs.get_unstaged_diff(highlighter) {
+        let diff_files = match crate::profile::time_with(
+            "diff.load_unstaged",
+            || vcs.get_unstaged_diff(highlighter),
+            profile_diff_result,
+        ) {
             Ok(diff_files) => diff_files,
-            Err(TuicrError::UnsupportedOperation(_)) => vcs.get_working_tree_diff(highlighter)?,
+            Err(TuicrError::UnsupportedOperation(_)) => crate::profile::time_with(
+                "diff.load_unstaged_fallback_working_tree",
+                || vcs.get_working_tree_diff(highlighter),
+                profile_diff_result,
+            )?,
             Err(e) => return Err(e),
         };
         let diff_files = Self::filter_ignored_diff_files(repo_root, diff_files);
@@ -1338,7 +1529,11 @@ impl App {
         highlighter: &SyntaxHighlighter,
         path_filter: Option<&str>,
     ) -> Result<Vec<DiffFile>> {
-        let diff_files = vcs.get_commit_range_diff(commit_ids, highlighter)?;
+        let diff_files = crate::profile::time_with(
+            "diff.load_commit_range",
+            || vcs.get_commit_range_diff(commit_ids, highlighter),
+            profile_diff_result,
+        )?;
         let diff_files = Self::filter_ignored_diff_files(repo_root, diff_files);
         let diff_files = if let Some(path) = path_filter {
             Self::filter_by_path(diff_files, path)
@@ -1355,7 +1550,11 @@ impl App {
         highlighter: &SyntaxHighlighter,
         path_filter: Option<&str>,
     ) -> Result<Vec<DiffFile>> {
-        let diff_files = vcs.get_working_tree_with_commits_diff(commit_ids, highlighter)?;
+        let diff_files = crate::profile::time_with(
+            "diff.load_working_tree_with_commits",
+            || vcs.get_working_tree_with_commits_diff(commit_ids, highlighter),
+            profile_diff_result,
+        )?;
         let diff_files = Self::filter_ignored_diff_files(repo_root, diff_files);
         let diff_files = if let Some(path) = path_filter {
             Self::filter_by_path(diff_files, path)
@@ -1363,6 +1562,57 @@ impl App {
             diff_files
         };
         Self::require_non_empty_diff_files(diff_files)
+    }
+
+    fn get_change_status_with_ignore(
+        vcs: &dyn VcsBackend,
+        repo_root: &Path,
+        highlighter: &SyntaxHighlighter,
+        path_filter: Option<&str>,
+    ) -> Result<(VcsChangeStatus, bool)> {
+        if path_filter.is_none() {
+            match vcs.get_change_status() {
+                Ok(status) => {
+                    if !crate::tuicrignore::has_ignore_rules(repo_root) {
+                        return Ok((status, true));
+                    }
+
+                    let staged = status.staged
+                        && Self::diff_exists(Self::get_staged_diff_with_ignore(
+                            vcs,
+                            repo_root,
+                            highlighter,
+                            path_filter,
+                        ))?;
+                    let unstaged = status.unstaged
+                        && Self::diff_exists(Self::get_unstaged_diff_with_ignore(
+                            vcs,
+                            repo_root,
+                            highlighter,
+                            path_filter,
+                        ))?;
+
+                    return Ok((VcsChangeStatus { staged, unstaged }, true));
+                }
+                Err(TuicrError::UnsupportedOperation(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let staged = Self::diff_exists(Self::get_staged_diff_with_ignore(
+            vcs,
+            repo_root,
+            highlighter,
+            path_filter,
+        ))?;
+        let unstaged = Self::diff_exists(Self::get_unstaged_diff_with_ignore(
+            vcs,
+            repo_root,
+            highlighter,
+            path_filter,
+        ))?;
+
+        Ok((VcsChangeStatus { staged, unstaged }, false))
     }
 
     fn load_staged_and_unstaged_selection(&mut self) -> Result<()> {
@@ -1707,43 +1957,84 @@ impl App {
     }
 
     pub fn set_message(&mut self, msg: impl Into<String>) {
-        self.message = Some(Message {
-            content: msg.into(),
-            message_type: MessageType::Info,
-        });
+        self.set_message_inner(msg, MessageType::Info, Some(MESSAGE_TTL_INFO));
     }
 
     pub fn set_warning(&mut self, msg: impl Into<String>) {
-        self.message = Some(Message {
-            content: msg.into(),
-            message_type: MessageType::Warning,
-        });
+        self.set_message_inner(msg, MessageType::Warning, Some(MESSAGE_TTL_WARNING));
     }
 
     pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.set_message_inner(msg, MessageType::Error, None);
+    }
+
+    /// Warning that stays until something else overwrites it. Used for state-tied
+    /// messages like the dirty-quit prompt where the visual must outlive any TTL.
+    pub fn set_sticky_warning(&mut self, msg: impl Into<String>) {
+        self.set_message_inner(msg, MessageType::Warning, None);
+    }
+
+    fn set_message_inner(
+        &mut self,
+        msg: impl Into<String>,
+        message_type: MessageType,
+        ttl: Option<Duration>,
+    ) {
         self.message = Some(Message {
             content: msg.into(),
-            message_type: MessageType::Error,
+            message_type,
+            expires_at: ttl.map(|d| Instant::now() + d),
         });
     }
 
+    pub fn clear_expired_message(&mut self) {
+        let expired = self
+            .message
+            .as_ref()
+            .and_then(|m| m.expires_at)
+            .is_some_and(|t| Instant::now() >= t);
+        if expired {
+            self.message = None;
+        }
+    }
+
     pub fn cursor_down(&mut self, lines: usize) {
-        let max_line = self.total_lines().saturating_sub(1);
+        let max_line = self.max_cursor_line();
+        let prev_cursor = self.diff_state.cursor_line;
+        let prev_scroll = self.diff_state.scroll_offset;
         self.diff_state.cursor_line = (self.diff_state.cursor_line + lines).min(max_line);
-        self.ensure_cursor_visible();
+        if self.diff_state.cursor_line != prev_cursor {
+            self.ensure_cursor_visible();
+            // Cap scroll change to cursor movement to prevent multi-line jumps
+            // when the view is catching up from a non-steady-state position.
+            let cursor_moved = self.diff_state.cursor_line - prev_cursor;
+            if self.diff_state.scroll_offset > prev_scroll + cursor_moved {
+                self.diff_state.scroll_offset = prev_scroll + cursor_moved;
+            }
+        }
         self.update_current_file_from_cursor();
     }
 
     pub fn cursor_up(&mut self, lines: usize) {
         self.diff_state.cursor_line = self.diff_state.cursor_line.saturating_sub(lines);
-        self.ensure_cursor_visible();
+        let visible_lines = self.diff_state.effective_visible_lines();
+        let scroll_margin = self.diff_state.effective_scroll_margin(self.scroll_offset);
+        // Enforce top margin
+        if self.diff_state.cursor_line < self.diff_state.scroll_offset + scroll_margin {
+            self.diff_state.scroll_offset =
+                self.diff_state.cursor_line.saturating_sub(scroll_margin);
+        }
+        // Ensure cursor is at least within the viewport (no bottom margin enforcement,
+        // just basic visibility — handles viewport shrink or wrap-mode changes).
+        if self.diff_state.cursor_line >= self.diff_state.scroll_offset + visible_lines {
+            self.diff_state.scroll_offset = self.diff_state.cursor_line - visible_lines + 1;
+        }
         self.update_current_file_from_cursor();
     }
 
     pub fn scroll_down(&mut self, lines: usize) {
         // For half-page/page scrolling, move both cursor and scroll
-        let total = self.total_lines();
-        let max_line = total.saturating_sub(1);
+        let max_line = self.max_cursor_line();
         let max_scroll = self.max_scroll_offset();
         self.diff_state.cursor_line = (self.diff_state.cursor_line + lines).min(max_line);
         self.diff_state.scroll_offset = (self.diff_state.scroll_offset + lines).min(max_scroll);
@@ -1762,8 +2053,11 @@ impl App {
     pub fn scroll_view_down(&mut self, lines: usize) {
         let max_scroll = self.max_scroll_offset();
         self.diff_state.scroll_offset = (self.diff_state.scroll_offset + lines).min(max_scroll);
-        if self.diff_state.cursor_line < self.diff_state.scroll_offset {
-            self.diff_state.cursor_line = self.diff_state.scroll_offset;
+        let scroll_margin = self.diff_state.effective_scroll_margin(self.scroll_offset);
+        let min_cursor =
+            (self.diff_state.scroll_offset + scroll_margin).min(self.max_cursor_line());
+        if self.diff_state.cursor_line < min_cursor {
+            self.diff_state.cursor_line = min_cursor;
             self.update_current_file_from_cursor();
         }
     }
@@ -1819,21 +2113,31 @@ impl App {
         self.set_message(format!("Diff wrapping: {status}"));
     }
 
+    /// Adjusts scroll_offset so the cursor stays within the visible viewport,
+    /// respecting the configured scroll margin (minimum lines from edge).
     fn ensure_cursor_visible(&mut self) {
         // Use visible_line_count which is computed during render based on actual line widths.
-        // Fall back to viewport_height if not yet set (before first render).
-        let visible_lines = if self.diff_state.visible_line_count > 0 {
-            self.diff_state.visible_line_count
-        } else {
-            self.diff_state.viewport_height.max(1)
-        };
+        // Falls back to viewport_height if not yet set (before first render).
+        let visible_lines = self.diff_state.effective_visible_lines();
         let max_scroll = self.max_scroll_offset();
-        if self.diff_state.cursor_line < self.diff_state.scroll_offset {
-            self.diff_state.scroll_offset = self.diff_state.cursor_line;
-        }
-        if self.diff_state.cursor_line >= self.diff_state.scroll_offset + visible_lines {
+        let scroll_margin = self.diff_state.effective_scroll_margin(self.scroll_offset);
+        // Cursor too close to the top edge — scroll up
+        if self.diff_state.cursor_line < self.diff_state.scroll_offset + scroll_margin {
             self.diff_state.scroll_offset =
-                (self.diff_state.cursor_line - visible_lines + 1).min(max_scroll);
+                self.diff_state.cursor_line.saturating_sub(scroll_margin);
+        }
+        // Cursor too close to the bottom edge — scroll down.
+        // Reduce the margin near EOF so we don't scroll to show empty space
+        // when the last line is already visible (matches Vim behavior).
+        let lines_below = self
+            .max_cursor_line()
+            .saturating_sub(self.diff_state.cursor_line);
+        let bottom_margin = scroll_margin.min(lines_below);
+        if self.diff_state.cursor_line + bottom_margin
+            >= self.diff_state.scroll_offset + visible_lines
+        {
+            self.diff_state.scroll_offset =
+                (self.diff_state.cursor_line + bottom_margin - visible_lines + 1).min(max_scroll);
         }
     }
 
@@ -2137,6 +2441,22 @@ impl App {
         (idx < total).then_some(idx)
     }
 
+    pub fn commit_list_idx_at_screen_row(&self, screen_row: u16) -> Option<usize> {
+        let inner = self.commit_list_inner_area?;
+        if screen_row < inner.y || screen_row >= inner.y + inner.height {
+            return None;
+        }
+        let rel = (screen_row - inner.y) as usize;
+        let idx = self.commit_list_scroll_offset + rel;
+        let total = match self.input_mode {
+            InputMode::CommitSelect => {
+                self.visible_commit_count + usize::from(self.can_show_more_commits())
+            }
+            _ => self.review_commits.len(),
+        };
+        (idx < total).then_some(idx)
+    }
+
     /// Syncs `current_file_idx` so the file list selection follows when the
     /// new cursor lands on an annotation belonging to a file.
     pub fn move_cursor_to_annotation(&mut self, idx: usize) {
@@ -2153,6 +2473,210 @@ impl App {
         } else if idx >= self.diff_state.scroll_offset + viewport {
             self.diff_state.scroll_offset = idx + 1 - viewport;
         }
+    }
+
+    /// In SBS, picks Old or New per `side`, falling back to the other pane
+    /// if the requested one is empty. Unified diff rows ignore `side`.
+    pub fn content_for_side(&self, ann_idx: usize, side: LineSide) -> Option<&str> {
+        let ann = self.line_annotations.get(ann_idx)?;
+        match ann {
+            AnnotatedLine::DiffLine {
+                file_idx,
+                hunk_idx,
+                line_idx,
+                ..
+            } => {
+                let line = self
+                    .diff_files
+                    .get(*file_idx)?
+                    .hunks
+                    .get(*hunk_idx)?
+                    .lines
+                    .get(*line_idx)?;
+                Some(line.content.as_str())
+            }
+            AnnotatedLine::SideBySideLine {
+                file_idx,
+                hunk_idx,
+                del_line_idx,
+                add_line_idx,
+                ..
+            } => {
+                let hunk = self.diff_files.get(*file_idx)?.hunks.get(*hunk_idx)?;
+                let add = add_line_idx
+                    .and_then(|i| hunk.lines.get(i))
+                    .map(|l| l.content.as_str());
+                let del = del_line_idx
+                    .and_then(|i| hunk.lines.get(i))
+                    .map(|l| l.content.as_str());
+                match side {
+                    LineSide::New => add.or(del),
+                    LineSide::Old => del.or(add),
+                }
+            }
+            AnnotatedLine::ExpandedContext { gap_id, line_idx } => self
+                .get_expanded_line(gap_id, *line_idx)
+                .map(|l| l.content.as_str()),
+            _ => None,
+        }
+    }
+
+    /// For annotations rendered outside the content gutter (hunk headers,
+    /// file headers): returns a clean copy text. The selection's char range
+    /// is meaningless for these — they're emitted whole or not at all.
+    fn atomic_text_for_annotation(&self, ann_idx: usize) -> Option<String> {
+        match self.line_annotations.get(ann_idx)? {
+            AnnotatedLine::HunkHeader { file_idx, hunk_idx } => {
+                let hunk = self.diff_files.get(*file_idx)?.hunks.get(*hunk_idx)?;
+                Some(hunk.header.clone())
+            }
+            AnnotatedLine::FileHeader { file_idx } => {
+                let file = self.diff_files.get(*file_idx)?;
+                if file.is_commit_message {
+                    Some("Commit Message".to_string())
+                } else {
+                    Some(format!(
+                        "{} [{}]",
+                        file.display_path().display(),
+                        file.status.as_char()
+                    ))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn copy_visual_selection(&mut self) -> Result<usize> {
+        let Some(sel) = self.visual_selection else {
+            return Ok(0);
+        };
+        let (start, end) = sel.ordered();
+        let side = sel.anchor.side;
+        let mut out = String::new();
+        let mut emitted = 0usize;
+        for idx in start.annotation_idx..=end.annotation_idx {
+            let snippet = if let Some(content) = self.content_for_side(idx, side) {
+                let total = content.chars().count();
+                let (lo, hi) = sel.char_range(idx, total);
+                char_slice(content, lo, Some(hi)).to_string()
+            } else if let Some(text) = self.atomic_text_for_annotation(idx) {
+                text
+            } else {
+                continue;
+            };
+            if emitted > 0 {
+                out.push('\n');
+            }
+            out.push_str(&snippet);
+            emitted += 1;
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let count = out.chars().count();
+        crate::output::copy_text_to_clipboard(&out)
+            .map_err(|e| TuicrError::Clipboard(format!("{e}")))?;
+        Ok(count)
+    }
+
+    pub fn pane_geometry(&self, inner: ratatui::layout::Rect, side: LineSide) -> PaneGeom {
+        match self.diff_view_mode {
+            DiffViewMode::Unified => {
+                let content_width = (inner.width as usize).saturating_sub(UNIFIED_GUTTER as usize);
+                PaneGeom {
+                    content_x_start: inner.x + UNIFIED_GUTTER,
+                    content_x_end: inner.x + inner.width,
+                    content_width,
+                }
+            }
+            DiffViewMode::SideBySide => {
+                let half_w = (inner.width.saturating_sub(SBS_OVERHEAD) / 2) as usize;
+                match side {
+                    LineSide::Old => PaneGeom {
+                        content_x_start: inner.x + SBS_LEFT_GUTTER,
+                        content_x_end: inner.x + SBS_LEFT_GUTTER + half_w as u16,
+                        content_width: half_w,
+                    },
+                    LineSide::New => {
+                        let start = inner.x + SBS_OVERHEAD + half_w as u16;
+                        PaneGeom {
+                            content_x_start: start,
+                            content_x_end: start + half_w as u16,
+                            content_width: half_w,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn side_at_x(
+        &self,
+        inner: ratatui::layout::Rect,
+        x: u16,
+        ann_default: LineSide,
+    ) -> LineSide {
+        match self.diff_view_mode {
+            DiffViewMode::Unified => ann_default,
+            DiffViewMode::SideBySide => {
+                let half_w = inner.width.saturating_sub(SBS_OVERHEAD) / 2;
+                let divider = inner.x + SBS_LEFT_GUTTER + half_w;
+                if x < divider {
+                    LineSide::Old
+                } else {
+                    LineSide::New
+                }
+            }
+        }
+    }
+
+    pub fn cell_to_sel_point(&self, screen_col: u16, screen_row: u16) -> Option<SelPoint> {
+        let idx = self.diff_annotation_at_screen_row(screen_row)?;
+        let inner = self.diff_inner_area?;
+        let ann = self.line_annotations.get(idx)?;
+        let side = self.side_at_x(inner, screen_col, annotation_side_default(ann));
+
+        let zero_point = SelPoint {
+            annotation_idx: idx,
+            char_offset: 0,
+            side,
+        };
+        let Some(content) = self.content_for_side(idx, side) else {
+            return Some(zero_point);
+        };
+        let geom = self.pane_geometry(inner, side);
+        if geom.content_width == 0 {
+            return Some(zero_point);
+        }
+        let last_col = geom.content_x_end.saturating_sub(1);
+        let col = screen_col.clamp(geom.content_x_start, last_col);
+        let col_in_row = (col - geom.content_x_start) as usize;
+
+        let rel = (screen_row - inner.y) as usize;
+        let mut walker = rel;
+        while walker > 0 && self.diff_row_to_annotation.get(walker - 1).copied() == Some(idx) {
+            walker -= 1;
+        }
+        let which_row = rel - walker;
+        let total_chars = content.chars().count();
+        let char_offset = (which_row * geom.content_width + col_in_row).min(total_chars);
+        Some(SelPoint {
+            annotation_idx: idx,
+            char_offset,
+            side,
+        })
+    }
+
+    /// Mirrors `ensure_cursor_visible`'s notion of visibility (uses the
+    /// renderer's `visible_line_count` when present so wrapping is honored).
+    pub fn is_cursor_visible(&self) -> bool {
+        let visible = if self.diff_state.visible_line_count > 0 {
+            self.diff_state.visible_line_count
+        } else {
+            self.diff_state.viewport_height.max(1)
+        };
+        let cursor = self.diff_state.cursor_line;
+        cursor >= self.diff_state.scroll_offset && cursor < self.diff_state.scroll_offset + visible
     }
 
     pub fn jump_to_file(&mut self, idx: usize) {
@@ -2181,11 +2705,11 @@ impl App {
     }
 
     pub fn jump_to_bottom(&mut self) {
-        let max_line = self.total_lines().saturating_sub(1);
+        let max_line = self.max_cursor_line();
         self.diff_state.cursor_line = max_line;
-        // Always position so the last line is at the bottom of the viewport
+        // Position so the last navigable line is at the bottom of the viewport
         let viewport = self.diff_state.viewport_height.max(1);
-        self.diff_state.scroll_offset = self.total_lines().saturating_sub(viewport);
+        self.diff_state.scroll_offset = (max_line + 1).saturating_sub(viewport);
         self.update_current_file_from_cursor();
     }
 
@@ -2561,24 +3085,24 @@ impl App {
                 .sum::<usize>()
     }
 
+    /// Last line the cursor can occupy. If the final annotation is a Spacing
+    /// separator it is not navigable content and is excluded.
+    pub fn max_cursor_line(&self) -> usize {
+        let total = self.total_lines();
+        if matches!(self.line_annotations.last(), Some(AnnotatedLine::Spacing)) {
+            total.saturating_sub(2)
+        } else {
+            total.saturating_sub(1)
+        }
+    }
+
     /// Calculate the maximum scroll offset.
     ///
-    /// When line wrapping is enabled, logical lines may expand to multiple visual rows.
-    /// This means we need to allow scrolling further to ensure all content is reachable.
-    /// We allow scrolling to `total - 1` so the last logical line can be at the top.
-    ///
-    /// When wrapping is disabled, each logical line is one visual row, so we use
-    /// `total - viewport` which stops when the last line reaches the bottom.
+    /// Allows scrolling until the last line of content is at the top of the viewport.
+    /// This permits empty space below content (e.g. when centering the cursor near EOF)
+    /// while ensuring there is always at least one line of content visible at the top.
     pub fn max_scroll_offset(&self) -> usize {
-        let total = self.total_lines();
-        let viewport = self.diff_state.viewport_height.max(1);
-        if self.diff_state.wrap_lines {
-            // With wrapping, allow scrolling to show the last line at the top
-            total.saturating_sub(1)
-        } else {
-            // Without wrapping, stop when last line is at the bottom
-            total.saturating_sub(viewport)
-        }
+        self.total_lines().saturating_sub(1)
     }
 
     /// Calculate the number of display lines a comment takes (header + content + footer)
@@ -2847,58 +3371,113 @@ impl App {
         self.comment_line_range = None;
     }
 
-    /// Enter visual selection mode, anchoring at the current cursor position
-    pub fn enter_visual_mode(&mut self, line: u32, side: LineSide) {
+    pub fn enter_visual_mode_at_cursor(&mut self) {
+        let idx = self.diff_state.cursor_line;
+        let side = self
+            .get_line_at_cursor()
+            .map(|(_, s)| s)
+            .unwrap_or(LineSide::New);
+        let len = self.annotation_content_len(idx, side);
+        let anchor = SelPoint {
+            annotation_idx: idx,
+            char_offset: 0,
+            side,
+        };
+        let head = SelPoint {
+            annotation_idx: idx,
+            char_offset: len,
+            side,
+        };
         self.input_mode = InputMode::VisualSelect;
-        self.visual_anchor = Some((line, side));
+        self.visual_selection = Some(VisualSelection { anchor, head });
     }
 
-    /// Exit visual selection mode and return to normal mode
     pub fn exit_visual_mode(&mut self) {
         self.input_mode = InputMode::Normal;
-        self.visual_anchor = None;
+        self.visual_selection = None;
     }
 
-    /// Get the current visual selection range (if in visual mode)
-    /// Returns None if not in visual mode or if there's no valid selection
-    pub fn get_visual_selection(&self) -> Option<(LineRange, LineSide)> {
+    pub fn get_visual_selection(&self) -> Option<&VisualSelection> {
         if self.input_mode != InputMode::VisualSelect {
             return None;
         }
-
-        let (anchor_line, anchor_side) = self.visual_anchor?;
-        let (current_line, current_side) = self.get_line_at_cursor()?;
-
-        // Don't allow selection across sides (old vs new)
-        if anchor_side != current_side {
-            return None;
-        }
-
-        let range = LineRange::new(anchor_line, current_line);
-        Some((range, anchor_side))
+        self.visual_selection.as_ref()
     }
 
-    /// Check if a given line is within the current visual selection
-    pub fn is_line_in_visual_selection(&self, line: u32, side: LineSide) -> bool {
-        if let Some((range, sel_side)) = self.get_visual_selection() {
-            sel_side == side && range.contains(line)
+    pub fn annotation_content_len(&self, idx: usize, side: LineSide) -> usize {
+        self.content_for_side(idx, side)
+            .map(|s| s.chars().count())
+            .unwrap_or(0)
+    }
+
+    pub fn extend_visual_to_cursor(&mut self) {
+        let Some(sel) = self.visual_selection else {
+            return;
+        };
+        let anchor_idx = sel.anchor.annotation_idx;
+        let cursor_idx = self.diff_state.cursor_line;
+        let side = sel.anchor.side;
+        let anchor_len = self.annotation_content_len(anchor_idx, side);
+        let cursor_len = self.annotation_content_len(cursor_idx, side);
+        let (anchor_char, head_char) = if cursor_idx >= anchor_idx {
+            (0, cursor_len)
         } else {
-            false
+            (anchor_len, 0)
+        };
+        self.visual_selection = Some(VisualSelection {
+            anchor: SelPoint {
+                annotation_idx: anchor_idx,
+                char_offset: anchor_char,
+                side,
+            },
+            head: SelPoint {
+                annotation_idx: cursor_idx,
+                char_offset: head_char,
+                side,
+            },
+        });
+    }
+
+    pub fn visual_selection_line_range(&self) -> Option<(LineRange, LineSide)> {
+        let sel = self.get_visual_selection()?;
+        let (start, end) = sel.ordered();
+        let start_line = self.annotation_line_for_side(start.annotation_idx, start.side);
+        let end_line = self.annotation_line_for_side(end.annotation_idx, end.side);
+        let start_ln = start_line?;
+        let end_ln = end_line?;
+        Some((LineRange::new(start_ln, end_ln), start.side))
+    }
+
+    fn annotation_line_for_side(&self, idx: usize, side: LineSide) -> Option<u32> {
+        match self.line_annotations.get(idx)? {
+            AnnotatedLine::DiffLine {
+                old_lineno,
+                new_lineno,
+                ..
+            }
+            | AnnotatedLine::SideBySideLine {
+                old_lineno,
+                new_lineno,
+                ..
+            } => match side {
+                LineSide::New => *new_lineno,
+                LineSide::Old => *old_lineno,
+            },
+            _ => None,
         }
     }
 
-    /// Enter comment mode from visual selection
     pub fn enter_comment_from_visual(&mut self) {
-        if let Some((range, side)) = self.get_visual_selection() {
+        if let Some((range, side)) = self.visual_selection_line_range() {
             self.comment_line_range = Some((range, side));
-            self.comment_line = Some((range.end, side)); // Key by end line
+            self.comment_line = Some((range.end, side));
             self.input_mode = InputMode::Comment;
             self.comment_buffer.clear();
             self.comment_cursor = 0;
             self.comment_type = self.default_comment_type();
             self.comment_is_review_level = false;
             self.comment_is_file_level = false;
-            self.visual_anchor = None;
+            self.visual_selection = None;
         } else {
             self.set_warning("Invalid visual selection");
             self.exit_visual_mode();
@@ -3088,29 +3667,14 @@ impl App {
         }
 
         let highlighter = self.theme.syntax_highlighter();
-        let has_staged_changes = match Self::get_staged_diff_with_ignore(
+        let (change_status, _) = Self::get_change_status_with_ignore(
             self.vcs.as_ref(),
             &self.vcs_info.root_path,
             highlighter,
             self.path_filter.as_deref(),
-        ) {
-            Ok(_) => true,
-            Err(TuicrError::NoChanges) => false,
-            Err(TuicrError::UnsupportedOperation(_)) => false,
-            Err(e) => return Err(e),
-        };
-
-        let has_unstaged_changes = match Self::get_unstaged_diff_with_ignore(
-            self.vcs.as_ref(),
-            &self.vcs_info.root_path,
-            highlighter,
-            self.path_filter.as_deref(),
-        ) {
-            Ok(_) => true,
-            Err(TuicrError::NoChanges) => false,
-            Err(TuicrError::UnsupportedOperation(_)) => false,
-            Err(e) => return Err(e),
-        };
+        )?;
+        let has_staged_changes = change_status.staged;
+        let has_unstaged_changes = change_status.unstaged;
 
         let commits = self.vcs.get_recent_commits(0, VISIBLE_COMMIT_COUNT)?;
         if commits.is_empty() && !has_staged_changes && !has_unstaged_changes {
@@ -3464,6 +4028,21 @@ impl App {
     }
 
     pub fn confirm_commit_selection(&mut self) -> Result<()> {
+        let selection = match self.commit_selection_range {
+            Some((start, end)) => format!(
+                "range={start}..={end}, rows={}",
+                end.saturating_sub(start) + 1
+            ),
+            None => "range=none, rows=0".to_string(),
+        };
+        crate::profile::time_with(
+            "commit_select.confirm_selection",
+            || self.confirm_commit_selection_inner(),
+            |result| format!("{selection}, {}", profile_unit_result(result)),
+        )
+    }
+
+    fn confirm_commit_selection_inner(&mut self) -> Result<()> {
         let Some((start, end)) = self.commit_selection_range else {
             self.set_message("Select at least one commit");
             return Ok(());
@@ -4764,145 +5343,414 @@ mod commit_selection_tests {
 
 #[cfg(test)]
 mod scroll_tests {
-    use super::*;
-
-    /// Test the max_scroll_offset calculation logic directly using DiffState
-    /// This tests the core algorithm without needing full App setup
-    fn calc_max_scroll(total_lines: usize, viewport_height: usize, wrap_lines: bool) -> usize {
-        let viewport = viewport_height.max(1);
-        if wrap_lines {
-            // With wrapping, allow scrolling to show the last line at the top
-            total_lines.saturating_sub(1)
-        } else {
-            // Without wrapping, stop when last line is at the bottom
-            total_lines.saturating_sub(viewport)
-        }
+    /// max_scroll_offset is simply total_lines - 1 (last line can be at top).
+    fn calc_max_scroll(total_lines: usize) -> usize {
+        total_lines.saturating_sub(1)
     }
 
     #[test]
-    fn should_calculate_max_scroll_without_wrapping() {
-        // Given 103 total lines and viewport of 20 (simulating header + 100 lines + spacing)
-        let total = 103;
-        let viewport = 20;
-
-        // When we calculate max_scroll without wrapping
-        let max_scroll = calc_max_scroll(total, viewport, false);
-
-        // Then max_scroll should be total - viewport (allows last line at bottom)
-        assert_eq!(max_scroll, 83); // 103 - 20
+    fn should_calculate_max_scroll() {
+        // Last line can be scrolled to the top of the viewport
+        assert_eq!(calc_max_scroll(103), 102);
+        assert_eq!(calc_max_scroll(20), 19);
     }
 
     #[test]
-    fn should_calculate_max_scroll_with_wrapping() {
-        // Given 103 total lines and viewport of 20, with wrapping enabled
-        let total = 103;
-        let viewport = 20;
-
-        // When we calculate max_scroll with wrapping
-        let max_scroll = calc_max_scroll(total, viewport, true);
-
-        // Then max_scroll should be total - 1 (allows last line at top)
-        assert_eq!(max_scroll, 102); // 103 - 1
-    }
-
-    #[test]
-    fn should_allow_scrolling_further_with_wrapping() {
-        // Given identical content with and without wrapping
-        let total = 103;
-        let viewport = 20;
-
-        // When we calculate max_scroll for both
-        let max_no_wrap = calc_max_scroll(total, viewport, false);
-        let max_with_wrap = calc_max_scroll(total, viewport, true);
-
-        // Then wrapping should allow scrolling further
-        assert!(
-            max_with_wrap > max_no_wrap,
-            "With wrapping, max_scroll ({}) should be greater than without ({})",
-            max_with_wrap,
-            max_no_wrap
-        );
-
-        // The difference should be viewport - 1
-        assert_eq!(max_with_wrap - max_no_wrap, viewport - 1);
-    }
-
-    #[test]
-    fn should_handle_small_content_without_wrapping() {
-        // Given content smaller than viewport (13 lines in viewport of 50)
-        let total = 13;
-        let viewport = 50;
-
-        // When we calculate max_scroll
-        let max_scroll = calc_max_scroll(total, viewport, false);
-
-        // Then max_scroll should be 0 (no scrolling needed)
-        assert_eq!(max_scroll, 0);
-    }
-
-    #[test]
-    fn should_handle_small_content_with_wrapping() {
-        // Given content smaller than viewport with wrapping
-        let total = 13;
-        let viewport = 50;
-
-        // When we calculate max_scroll
-        let max_scroll = calc_max_scroll(total, viewport, true);
-
-        // Then max_scroll should still allow scrolling to the last line
-        assert_eq!(max_scroll, 12); // total - 1
+    fn should_handle_small_content() {
+        // Even with few lines, can scroll last line to top
+        assert_eq!(calc_max_scroll(13), 12);
+        assert_eq!(calc_max_scroll(1), 0);
     }
 
     #[test]
     fn should_handle_empty_content() {
-        // Given no content (0 lines)
-        let total = 0;
-        let viewport = 20;
+        assert_eq!(calc_max_scroll(0), 0);
+    }
+}
 
-        // When we calculate max_scroll
-        let max_scroll_no_wrap = calc_max_scroll(total, viewport, false);
-        let max_scroll_wrap = calc_max_scroll(total, viewport, true);
+#[cfg(test)]
+mod scroll_behavior_tests {
+    use super::*;
+    use crate::model::FileStatus;
+    use crate::vcs::traits::VcsType;
 
-        // Then both should be 0
-        assert_eq!(max_scroll_no_wrap, 0);
-        assert_eq!(max_scroll_wrap, 0);
+    struct DummyVcs {
+        info: VcsInfo,
+    }
+
+    impl VcsBackend for DummyVcs {
+        fn info(&self) -> &VcsInfo {
+            &self.info
+        }
+
+        fn get_working_tree_diff(&self, _highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
+            Err(TuicrError::NoChanges)
+        }
+
+        fn fetch_context_lines(
+            &self,
+            _file_path: &Path,
+            _file_status: FileStatus,
+            _start_line: u32,
+            _end_line: u32,
+        ) -> Result<Vec<DiffLine>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Build a test App with a single file containing `n` context lines.
+    /// Total rendered lines = 1 (review header) + 1 (file header) + 1 (spacing)
+    ///                       + 1 (hunk header) + n (diff lines) = n + 4.
+    /// The viewport is set to `viewport` lines.
+    fn build_scroll_app(n: usize, viewport: usize, scroll_offset_config: usize) -> App {
+        let lines: Vec<DiffLine> = (1..=n)
+            .map(|i| DiffLine {
+                origin: crate::model::LineOrigin::Context,
+                content: format!("line {i}"),
+                old_lineno: Some(i as u32),
+                new_lineno: Some(i as u32),
+                highlighted_spans: None,
+            })
+            .collect();
+
+        let hunk = DiffHunk {
+            header: "@@ -1,N +1,N @@".to_string(),
+            lines,
+            old_start: 1,
+            old_count: n as u32,
+            new_start: 1,
+            new_count: n as u32,
+        };
+
+        let file = DiffFile {
+            old_path: None,
+            new_path: Some(PathBuf::from("test.rs")),
+            status: FileStatus::Modified,
+            hunks: vec![hunk],
+            is_binary: false,
+            is_too_large: false,
+            is_commit_message: false,
+            content_hash: 0,
+        };
+
+        let vcs_info = VcsInfo {
+            root_path: PathBuf::from("/tmp"),
+            head_commit: "abc".to_string(),
+            branch_name: Some("main".to_string()),
+            vcs_type: VcsType::Git,
+        };
+        let session = ReviewSession::new(
+            vcs_info.root_path.clone(),
+            vcs_info.head_commit.clone(),
+            vcs_info.branch_name.clone(),
+            SessionDiffSource::WorkingTree,
+        );
+
+        let mut app = App::build(
+            Box::new(DummyVcs {
+                info: vcs_info.clone(),
+            }),
+            vcs_info,
+            Theme::dark(),
+            None,
+            false,
+            vec![file],
+            session,
+            DiffSource::WorkingTree,
+            InputMode::Normal,
+            Vec::new(),
+            None,
+        )
+        .expect("failed to build test app");
+
+        app.diff_state.viewport_height = viewport;
+        app.diff_state.visible_line_count = viewport;
+        app.scroll_offset = scroll_offset_config;
+        app
     }
 
     #[test]
-    fn should_handle_zero_viewport() {
-        // Given content with viewport of 0 (edge case)
-        let total = 100;
-        let viewport = 0;
+    fn zz_on_last_line_centers_cursor() {
+        // 40 diff lines + 4 overhead = 44 total. max_cursor = 42. Viewport = 20.
+        let mut app = build_scroll_app(40, 20, 5);
+        assert_eq!(app.total_lines(), 44);
+        let last = app.max_cursor_line(); // 42
 
-        // When we calculate max_scroll (viewport.max(1) makes it 1)
-        let max_scroll_no_wrap = calc_max_scroll(total, viewport, false);
-        let max_scroll_wrap = calc_max_scroll(total, viewport, true);
+        app.diff_state.cursor_line = last;
+        app.center_cursor();
 
-        // Then no_wrap should be total - 1, wrap should be total - 1
-        assert_eq!(max_scroll_no_wrap, 99); // total - 1 (since viewport becomes 1)
-        assert_eq!(max_scroll_wrap, 99); // total - 1
+        // scroll = cursor - viewport/2 = 42 - 10 = 32
+        assert_eq!(app.diff_state.scroll_offset, 32);
+        assert_eq!(app.diff_state.cursor_line, 42);
     }
 
     #[test]
-    fn should_match_max_scroll_offset_implementation() {
-        // Verify calc_max_scroll matches the actual implementation
-        let diff_state_no_wrap = DiffState {
-            viewport_height: 20,
-            wrap_lines: false,
-            ..Default::default()
-        };
+    fn after_zz_on_last_line_j_does_not_change_scroll() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
 
-        let diff_state_wrap = DiffState {
-            viewport_height: 20,
-            wrap_lines: true,
-            ..Default::default()
-        };
+        app.diff_state.cursor_line = last;
+        app.center_cursor();
+        let scroll_after_zz = app.diff_state.scroll_offset;
 
-        // Test that DiffState defaults match our expectations
-        assert!(!diff_state_no_wrap.wrap_lines);
-        assert!(diff_state_wrap.wrap_lines);
-        assert_eq!(diff_state_no_wrap.viewport_height, 20);
-        assert_eq!(diff_state_wrap.viewport_height, 20);
+        // Press j — cursor is already at max, and it's centered (not near bottom margin)
+        app.cursor_down(1);
+
+        assert_eq!(app.diff_state.cursor_line, last);
+        assert_eq!(
+            app.diff_state.scroll_offset, scroll_after_zz,
+            "j after zz on last line should not change scroll"
+        );
+    }
+
+    #[test]
+    fn after_zz_on_last_line_k_does_not_change_scroll() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        app.diff_state.cursor_line = last;
+        app.center_cursor();
+        let scroll_after_zz = app.diff_state.scroll_offset;
+
+        // Press k — cursor moves up 1, still in free zone
+        app.cursor_up(1);
+
+        assert_eq!(app.diff_state.cursor_line, last - 1);
+        assert_eq!(
+            app.diff_state.scroll_offset, scroll_after_zz,
+            "k after zz on last line should not change scroll"
+        );
+    }
+
+    #[test]
+    fn after_zz_no_oscillation_with_k_then_j() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        app.diff_state.cursor_line = last;
+        app.center_cursor();
+        let scroll_after_zz = app.diff_state.scroll_offset;
+
+        // k then j should return to the same state
+        app.cursor_up(1);
+        app.cursor_down(1);
+
+        assert_eq!(app.diff_state.cursor_line, last);
+        assert_eq!(
+            app.diff_state.scroll_offset, scroll_after_zz,
+            "k then j after zz should not cause oscillation"
+        );
+    }
+
+    #[test]
+    fn j_scrolls_one_line_at_a_time() {
+        // Viewport 20, total 44. Start at the middle and scroll down.
+        let mut app = build_scroll_app(40, 20, 5);
+
+        // Position cursor and scroll in steady state near the bottom margin
+        app.diff_state.cursor_line = 20;
+        app.diff_state.scroll_offset = 6;
+        // steady state: cursor at bottom margin = scroll + visible - margin - 1
+
+        // Scroll down multiple times and verify single-line increments
+        for _ in 0..10 {
+            let prev_scroll = app.diff_state.scroll_offset;
+            let prev_cursor = app.diff_state.cursor_line;
+            app.cursor_down(1);
+            let scroll_delta = app.diff_state.scroll_offset - prev_scroll;
+            let cursor_delta = app.diff_state.cursor_line - prev_cursor;
+            assert_eq!(cursor_delta, 1, "cursor should advance by exactly 1");
+            assert!(
+                scroll_delta <= 1,
+                "scroll should advance by at most 1, got {scroll_delta}"
+            );
+        }
+    }
+
+    #[test]
+    fn j_on_last_line_near_bottom_does_not_scroll() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        // Put cursor at last line with it near the bottom of viewport
+        app.diff_state.cursor_line = last;
+        app.diff_state.scroll_offset = last.saturating_sub(19); // cursor at bottom of viewport
+
+        let prev_scroll = app.diff_state.scroll_offset;
+        app.cursor_down(1);
+
+        assert_eq!(app.diff_state.cursor_line, last);
+        assert_eq!(
+            app.diff_state.scroll_offset, prev_scroll,
+            "j on last line should never scroll the view"
+        );
+    }
+
+    #[test]
+    fn j_on_last_line_centered_does_not_scroll() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        // Center cursor on last line
+        app.diff_state.cursor_line = last;
+        app.center_cursor();
+        let scroll_after_center = app.diff_state.scroll_offset;
+
+        app.cursor_down(1);
+
+        assert_eq!(
+            app.diff_state.scroll_offset, scroll_after_center,
+            "j on last line when centered should not scroll"
+        );
+    }
+
+    #[test]
+    fn k_reclaims_empty_space_below() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        // Put cursor at last line at top of view (maximum empty space below)
+        app.diff_state.cursor_line = last;
+        app.diff_state.scroll_offset = last; // only 1 line visible
+
+        // Press k — should immediately reclaim space (reduce scroll)
+        app.cursor_up(1);
+
+        assert_eq!(app.diff_state.cursor_line, last - 1);
+        assert!(
+            app.diff_state.scroll_offset < last,
+            "k should reclaim empty space below, scroll was {} expected less than {}",
+            app.diff_state.scroll_offset,
+            last
+        );
+    }
+
+    #[test]
+    fn max_scroll_allows_last_line_at_top() {
+        let app = build_scroll_app(40, 20, 5);
+        let total = app.total_lines();
+
+        assert_eq!(
+            app.max_scroll_offset(),
+            total - 1,
+            "max scroll should allow last line at top of viewport"
+        );
+    }
+
+    #[test]
+    fn smooth_scroll_to_end_no_jumps() {
+        // Start at beginning, scroll all the way to the end with j presses
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        app.diff_state.cursor_line = 0;
+        app.diff_state.scroll_offset = 0;
+
+        let mut max_scroll_delta = 0;
+        for _ in 0..last {
+            let prev_scroll = app.diff_state.scroll_offset;
+            app.cursor_down(1);
+            let delta = app.diff_state.scroll_offset.saturating_sub(prev_scroll);
+            if delta > max_scroll_delta {
+                max_scroll_delta = delta;
+            }
+        }
+
+        assert_eq!(app.diff_state.cursor_line, last);
+        assert!(
+            max_scroll_delta <= 1,
+            "scroll should never jump more than 1 line at a time, max was {max_scroll_delta}"
+        );
+    }
+
+    #[test]
+    fn k_below_midpoint_only_moves_cursor() {
+        // After G, cursor is near the bottom of viewport. Pressing k should
+        // only move the cursor, not also scroll the view (which would cause
+        // a visual 2-line jump).
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+
+        // Simulate G: cursor at last line, scroll positions it at bottom
+        app.diff_state.cursor_line = last;
+        app.diff_state.scroll_offset = last.saturating_sub(19);
+        let scroll_before = app.diff_state.scroll_offset;
+
+        // k should only move cursor, not scroll
+        app.cursor_up(1);
+        assert_eq!(app.diff_state.cursor_line, last - 1);
+        assert_eq!(
+            app.diff_state.scroll_offset, scroll_before,
+            "k when cursor is below midpoint should not change scroll"
+        );
+    }
+
+    #[test]
+    fn no_scroll_when_last_line_visible() {
+        // When the last content line is visible, cursor should descend
+        // to it without the view scrolling (no bottom margin near EOF).
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line(); // 42
+
+        // Position so last line is visible at viewport bottom: scroll=23, shows lines 23-42
+        app.diff_state.scroll_offset = last.saturating_sub(19); // 23
+        app.diff_state.cursor_line = last - 5; // 37, viewport position 14
+
+        // Descend toward the last line — scroll should not change
+        for i in 0..5 {
+            let scroll_before = app.diff_state.scroll_offset;
+            app.cursor_down(1);
+            assert_eq!(
+                app.diff_state.scroll_offset, scroll_before,
+                "scroll should not change on step {i} (cursor near EOF with last line visible)"
+            );
+        }
+        assert_eq!(app.diff_state.cursor_line, last);
+    }
+
+    #[test]
+    fn cursor_cannot_go_past_last_content_line() {
+        let mut app = build_scroll_app(40, 20, 5);
+        let last = app.max_cursor_line();
+        let total = app.total_lines();
+
+        // max_cursor should be strictly less than total_lines - 1
+        // (total-1 is the trailing Spacing line)
+        assert_eq!(last, total - 2);
+
+        // cursor_down from last line should not advance
+        app.diff_state.cursor_line = last;
+        app.cursor_down(1);
+        assert_eq!(app.diff_state.cursor_line, last);
+    }
+
+    #[test]
+    fn effective_scroll_margin_prevents_oscillation() {
+        // With viewport 21 (odd), margin should be at most 9 (= 21/2 - 1 = 9)
+        // so that after centering at position 10 (= 21/2), there's free space
+        let state = DiffState {
+            visible_line_count: 21,
+            viewport_height: 21,
+            ..DiffState::default()
+        };
+        let margin = state.effective_scroll_margin(100);
+        assert!(
+            margin < 21 / 2,
+            "margin ({margin}) must be strictly less than half viewport ({})",
+            21 / 2
+        );
+    }
+
+    #[test]
+    fn scroll_offset_zero_means_no_margin() {
+        // When scroll_offset is 0, effective margin should be 0 (no margin at file start)
+        let state = DiffState {
+            visible_line_count: 20,
+            viewport_height: 20,
+            ..DiffState::default()
+        };
+        let margin = state.effective_scroll_margin(0);
+        assert_eq!(margin, 0, "margin should be 0 when scroll_offset is 0");
     }
 }
 
@@ -5101,6 +5949,143 @@ mod find_source_line_tests {
 
         let result = find_source_line(&annotations, 0, 20);
         assert_eq!(result, FindSourceLineResult::Nearest(0));
+    }
+}
+
+#[cfg(test)]
+mod change_status_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::vcs::traits::VcsType;
+
+    struct StatusProbeMock {
+        info: VcsInfo,
+        status: VcsChangeStatus,
+        staged_files: Vec<DiffFile>,
+        unstaged_files: Vec<DiffFile>,
+    }
+
+    impl VcsBackend for StatusProbeMock {
+        fn info(&self) -> &VcsInfo {
+            &self.info
+        }
+
+        fn get_working_tree_diff(&self, _highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
+            Err(TuicrError::NoChanges)
+        }
+
+        fn get_staged_diff(&self, _highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
+            if self.staged_files.is_empty() {
+                Err(TuicrError::NoChanges)
+            } else {
+                Ok(self.staged_files.clone())
+            }
+        }
+
+        fn get_unstaged_diff(&self, _highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
+            if self.unstaged_files.is_empty() {
+                Err(TuicrError::NoChanges)
+            } else {
+                Ok(self.unstaged_files.clone())
+            }
+        }
+
+        fn get_change_status(&self) -> Result<VcsChangeStatus> {
+            Ok(self.status)
+        }
+
+        fn fetch_context_lines(
+            &self,
+            _file_path: &Path,
+            _file_status: FileStatus,
+            _start_line: u32,
+            _end_line: u32,
+        ) -> Result<Vec<DiffLine>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn diff_file(path: &str) -> DiffFile {
+        DiffFile {
+            old_path: None,
+            new_path: Some(PathBuf::from(path)),
+            status: FileStatus::Modified,
+            hunks: Vec::new(),
+            is_binary: false,
+            is_too_large: false,
+            is_commit_message: false,
+            content_hash: 0,
+        }
+    }
+
+    fn mock_vcs(root_path: PathBuf) -> StatusProbeMock {
+        StatusProbeMock {
+            info: VcsInfo {
+                root_path,
+                head_commit: "HEAD".to_string(),
+                branch_name: Some("main".to_string()),
+                vcs_type: VcsType::Git,
+            },
+            status: VcsChangeStatus {
+                staged: true,
+                unstaged: true,
+            },
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn status_probe_rechecks_positive_rows_when_ignore_rules_exist() {
+        let dir = tempdir().expect("failed to create temp dir");
+        fs::write(dir.path().join(".tuicrignore"), "ignored/\n")
+            .expect("failed to write .tuicrignore");
+        let mut vcs = mock_vcs(dir.path().to_path_buf());
+        vcs.staged_files = vec![diff_file("ignored/generated.rs")];
+        vcs.unstaged_files = vec![diff_file("src/lib.rs")];
+
+        let (status, used_probe) = App::get_change_status_with_ignore(
+            &vcs,
+            dir.path(),
+            &SyntaxHighlighter::default(),
+            None,
+        )
+        .expect("failed to get change status");
+
+        assert!(used_probe);
+        assert_eq!(
+            status,
+            VcsChangeStatus {
+                staged: false,
+                unstaged: true,
+            }
+        );
+    }
+
+    #[test]
+    fn status_probe_does_not_load_diffs_without_ignore_rules() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let vcs = mock_vcs(dir.path().to_path_buf());
+
+        let (status, used_probe) = App::get_change_status_with_ignore(
+            &vcs,
+            dir.path(),
+            &SyntaxHighlighter::default(),
+            None,
+        )
+        .expect("failed to get change status");
+
+        assert!(used_probe);
+        assert_eq!(
+            status,
+            VcsChangeStatus {
+                staged: true,
+                unstaged: true,
+            }
+        );
     }
 }
 
@@ -5573,5 +6558,58 @@ mod expand_gap_tests {
             .filter(|a| matches!(a, AnnotatedLine::Expander { gap_id: g, direction: ExpandDirection::Both } if *g == gap_id))
             .count();
         assert_eq!(both_count, 1, "should merge to ↕ when <20 remaining");
+    }
+}
+
+#[cfg(test)]
+mod visual_selection_tests {
+    use super::*;
+
+    fn p(idx: usize, off: usize) -> SelPoint {
+        SelPoint {
+            annotation_idx: idx,
+            char_offset: off,
+            side: LineSide::New,
+        }
+    }
+
+    #[test]
+    fn collapsed_starts_at_point() {
+        let sel = VisualSelection::collapsed(p(5, 3));
+        assert_eq!(sel.anchor, p(5, 3));
+        assert_eq!(sel.head, p(5, 3));
+    }
+
+    #[test]
+    fn ordered_returns_anchor_head_when_already_in_order() {
+        let sel = VisualSelection {
+            anchor: p(1, 0),
+            head: p(4, 8),
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, p(1, 0));
+        assert_eq!(end, p(4, 8));
+    }
+
+    #[test]
+    fn ordered_swaps_when_head_before_anchor_by_idx() {
+        let sel = VisualSelection {
+            anchor: p(4, 0),
+            head: p(1, 0),
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, p(1, 0));
+        assert_eq!(end, p(4, 0));
+    }
+
+    #[test]
+    fn ordered_breaks_ties_on_idx_by_char_offset() {
+        let sel = VisualSelection {
+            anchor: p(7, 20),
+            head: p(7, 5),
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, p(7, 5));
+        assert_eq!(end, p(7, 20));
     }
 }
