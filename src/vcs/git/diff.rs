@@ -637,13 +637,29 @@ mod tests {
         create_initial_commit(&repo, "file.txt", "base\n");
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
 
-        // Move HEAD onto a branch outside resolve_base_reference's candidate list,
-        // then delete any local main/master branches so all four fallbacks fail.
+        // Capture whatever branch git init created (depends on init.defaultBranch);
+        // we'll delete it below so no fallback in resolve_base_reference can match.
+        let default_branch = repo
+            .head()
+            .unwrap()
+            .shorthand()
+            .expect("HEAD has no shorthand")
+            .to_string();
+
+        // Move HEAD onto a branch outside resolve_base_reference's candidate list.
         repo.branch("feature-only", &head_commit, true)
             .expect("failed to create feature branch");
         repo.set_head("refs/heads/feature-only")
             .expect("failed to set HEAD");
-        for name in ["main", "master"] {
+
+        // Delete the original default branch plus the well-known fallbacks so
+        // every candidate in resolve_base_reference (origin/main, origin/master,
+        // main, master) fails to resolve.
+        let candidates_to_delete = [default_branch.as_str(), "main", "master"];
+        for name in candidates_to_delete {
+            if name == "feature-only" {
+                continue;
+            }
             if let Ok(mut branch) = repo.find_branch(name, git2::BranchType::Local) {
                 branch.delete().expect("failed to delete fallback branch");
             }
