@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     AnnotatedLine, App, DiffViewMode, ExpandDirection, FileTreeItem, FocusedPanel,
-    GAP_EXPAND_BATCH, GapId, InputMode,
+    GAP_EXPAND_BATCH, GapId, InputMode, VisualSelection,
 };
 use crate::model::{LineOrigin, LineRange, LineSide};
 use crate::theme::Theme;
@@ -104,6 +104,7 @@ fn render_commit_select(frame: &mut Frame, app: &mut App) {
 
     // Update viewport height for scroll calculations
     app.commit_list_viewport_height = inner.height as usize;
+    app.commit_list_inner_area = Some(inner);
 
     // Get range info for visual indicators
     let range = app.commit_selection_range;
@@ -228,7 +229,11 @@ fn render_commit_select(frame: &mut Frame, app: &mut App) {
     } else {
         String::new()
     };
-    let hints = format!(" j/k:navigate  Space:select range  Enter:confirm  q:quit{selection_info}");
+    let hints = if app.message.is_some() {
+        String::new()
+    } else {
+        format!(" j/k:navigate  Space:select range  Enter:confirm  q:quit{selection_info}")
+    };
     let hints_span = Span::styled(hints, Style::default().fg(theme.fg_secondary));
 
     let left_spans = vec![mode_span, hints_span];
@@ -265,6 +270,7 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         render_inline_commit_selector(frame, app, chunks[0]);
         chunks[1]
     } else {
+        app.commit_list_inner_area = None;
         area
     };
 
@@ -302,6 +308,7 @@ fn render_inline_commit_selector(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Update viewport height for scroll
     app.commit_list_viewport_height = inner.height as usize;
+    app.commit_list_inner_area = Some(inner);
 
     {
         let range = app.commit_selection_range;
@@ -999,27 +1006,7 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                         LineOrigin::Context => (" ", styles::diff_context_style(&app.theme)),
                     };
 
-                    // Check if this line is in visual selection
-                    let is_in_visual_selection = {
-                        let line_num = match diff_line.origin {
-                            LineOrigin::Addition | LineOrigin::Context => diff_line.new_lineno,
-                            LineOrigin::Deletion => diff_line.old_lineno,
-                        };
-                        let side = match diff_line.origin {
-                            LineOrigin::Addition | LineOrigin::Context => LineSide::New,
-                            LineOrigin::Deletion => LineSide::Old,
-                        };
-                        line_num
-                            .map(|ln| app.is_line_in_visual_selection(ln, side))
-                            .unwrap_or(false)
-                    };
-
-                    // Apply visual selection highlighting if applicable
-                    let style = if is_in_visual_selection {
-                        base_style.patch(styles::visual_selection_style(&app.theme))
-                    } else {
-                        base_style
-                    };
+                    let style = base_style;
 
                     let line_num_str = match diff_line.origin {
                         LineOrigin::Addition => diff_line
@@ -1039,13 +1026,7 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
 
                     let indicator = cursor_indicator(line_idx, current_line_idx);
 
-                    // Build line spans - use syntax highlighting if available
-                    let line_num_style = if is_in_visual_selection {
-                        styles::dim_style(&app.theme)
-                            .patch(styles::visual_selection_style(&app.theme))
-                    } else {
-                        styles::dim_style(&app.theme)
-                    };
+                    let line_num_style = styles::dim_style(&app.theme);
 
                     let mut line_spans = vec![
                         Span::styled(indicator, styles::current_line_indicator_style(&app.theme)),
@@ -1053,19 +1034,11 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                         Span::styled(format!("{prefix} "), style),
                     ];
 
-                    // Add content spans
                     if let Some(ref highlighted) = diff_line.highlighted_spans {
-                        // Use syntax-highlighted spans
                         for (span_style, span_text) in highlighted {
-                            let final_style = if is_in_visual_selection {
-                                span_style.patch(styles::visual_selection_style(&app.theme))
-                            } else {
-                                *span_style
-                            };
-                            line_spans.push(Span::styled(span_text.clone(), final_style));
+                            line_spans.push(Span::styled(span_text.clone(), *span_style));
                         }
                     } else {
-                        // Fall back to default diff styling
                         line_spans.push(Span::styled(diff_line.content.clone(), style));
                     }
 
@@ -1430,14 +1403,14 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Paint per-visual-row add/del backgrounds across full row width.
-    paint_unified_diff_row_backgrounds(
+    paint_unified_diff_rows_with(
         frame,
         inner,
         &visible_lines_unscrolled_for_bg,
         &line_widths,
         app.diff_state.wrap_lines,
         inner.width as usize,
-        app,
+        |_idx, line| unified_line_bg_style(line, &app.theme),
     );
 
     // Keep paragraph bg unset so pre-painted per-row diff backgrounds remain visible.
@@ -1446,6 +1419,26 @@ fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         diff = diff.wrap(Wrap { trim: false });
     }
     frame.render_widget(diff, inner);
+
+    // Cursor-line bg has to land after the paragraph: spans on +/- lines carry
+    // explicit diff_add_bg/diff_del_bg that would mask a pre-paint over the code.
+    if app.cursor_line_highlight {
+        paint_unified_diff_rows_with(
+            frame,
+            inner,
+            &visible_lines_unscrolled_for_bg,
+            &line_widths,
+            app.diff_state.wrap_lines,
+            inner.width as usize,
+            |idx, _line| {
+                is_line_highlighted(app, idx).then(|| Style::default().bg(app.theme.cursor_line_bg))
+            },
+        );
+    }
+
+    if let Some(sel) = app.visual_selection {
+        paint_visual_selection_overlay(frame, inner, app, sel, &app.theme);
+    }
 
     // Calculate screen position for comment cursor if in Comment mode
     if let Some(cursor_logical_line) = comment_cursor_logical_line {
@@ -1554,6 +1547,126 @@ fn populate_row_to_annotation(
             out.push(scroll_offset + i);
         }
         viewport_height
+    }
+}
+
+struct OverlayPaint {
+    sel: VisualSelection,
+    geom: crate::app::PaneGeom,
+    inner_left: u16,
+    inner_right: u16,
+    style: Style,
+}
+
+fn paint_visual_selection_overlay(
+    frame: &mut Frame,
+    inner: Rect,
+    app: &App,
+    sel: VisualSelection,
+    theme: &Theme,
+) {
+    let (start, end) = sel.ordered();
+    let paint = OverlayPaint {
+        sel,
+        geom: app.pane_geometry(inner, sel.anchor.side),
+        inner_left: inner.x,
+        inner_right: inner.x + inner.width.saturating_sub(1),
+        style: styles::visual_selection_style(theme),
+    };
+
+    let mut current: Option<(usize, u16, u16)> = None;
+    for rel in 0..app.diff_row_to_annotation.len() {
+        let ann_idx = app.diff_row_to_annotation[rel];
+        if ann_idx < start.annotation_idx {
+            continue;
+        }
+        if ann_idx > end.annotation_idx {
+            break;
+        }
+        let row = inner.y + rel as u16;
+        match current {
+            Some((cur, first, _)) if cur == ann_idx => {
+                current = Some((cur, first, row));
+            }
+            _ => {
+                if let Some(group) = current.take() {
+                    paint_annotation_group(frame, app, group, &paint);
+                }
+                current = Some((ann_idx, row, row));
+            }
+        }
+    }
+    if let Some(group) = current.take() {
+        paint_annotation_group(frame, app, group, &paint);
+    }
+}
+
+fn paint_annotation_group(
+    frame: &mut Frame,
+    app: &App,
+    group: (usize, u16, u16),
+    paint: &OverlayPaint,
+) {
+    let (ann_idx, first_row, last_row) = group;
+    if paint.geom.content_width == 0 {
+        return;
+    }
+
+    let side = paint.sel.anchor.side;
+    let group_height = (last_row - first_row) as usize + 1;
+    let pane_last_col = paint
+        .geom
+        .content_x_end
+        .saturating_sub(1)
+        .min(paint.inner_right);
+
+    let Some(content) = app.content_for_side(ann_idx, side) else {
+        // Headers and other non-content rows aren't bound by the pane
+        // gutter; tint the full inner width.
+        for which_row in 0..group_height {
+            let rect = Rect {
+                x: paint.inner_left,
+                y: first_row + which_row as u16,
+                width: paint.inner_right - paint.inner_left + 1,
+                height: 1,
+            };
+            frame.buffer_mut().set_style(rect, paint.style);
+        }
+        return;
+    };
+
+    let total_chars = content.chars().count();
+    let (lo, hi) = paint.sel.char_range(ann_idx, total_chars);
+    if hi <= lo {
+        return;
+    }
+
+    for which_row in 0..group_height {
+        let row_char_start = which_row * paint.geom.content_width;
+        let row_char_end = row_char_start + paint.geom.content_width;
+        let isect_lo = lo.max(row_char_start);
+        let isect_hi = hi.min(row_char_end);
+        if isect_hi <= isect_lo {
+            continue;
+        }
+        let col_lo_off = (isect_lo - row_char_start) as u16;
+        let col_hi_off = (isect_hi - row_char_start) as u16;
+        let col_lo = (paint.geom.content_x_start + col_lo_off).min(pane_last_col);
+        let col_hi_excl = paint.geom.content_x_start + col_hi_off;
+        if col_hi_excl == 0 {
+            continue;
+        }
+        let col_hi = col_hi_excl.saturating_sub(1).min(pane_last_col);
+        if col_lo > col_hi {
+            continue;
+        }
+        let rect = Rect {
+            x: col_lo,
+            y: first_row + which_row as u16,
+            width: col_hi - col_lo + 1,
+            height: 1,
+        };
+        frame.buffer_mut().set_style(rect, paint.style);
     }
 }
 
@@ -1763,10 +1876,8 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     // Reset comment input annotation offset (will be set if a comment input box is rendered)
     app.comment_input_annotation_offset = None;
 
-    // Calculate column widths (split the area in half)
     // Layout: indicator(1) + linenum(4) + space(1) + prefix(1) + content + " │ "(3) + linenum(4) + space(1) + prefix(1) + content
-    // Total overhead: 1 + 5 + 1 + 3 + 5 + 1 = 16
-    let available_width = inner.width.saturating_sub(16) as usize;
+    let available_width = inner.width.saturating_sub(crate::app::SBS_OVERHEAD) as usize;
     let content_width = available_width / 2;
 
     // Determine if we're in line comment mode (not file-level)
@@ -2260,7 +2371,6 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     frame.render_widget(diff, inner);
 
-    // Paint cursor/selection line highlights for side-by-side view
     if app.cursor_line_highlight {
         let viewport_height = inner.height as usize;
         for offset in 0..viewport_height {
@@ -2276,6 +2386,11 @@ fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                     .set_style(row_rect, Style::default().bg(app.theme.cursor_line_bg));
             }
         }
+    }
+
+    // Painted last so the cell overlay wins over cursor-line bg on overlap.
+    if let Some(sel) = app.visual_selection {
+        paint_visual_selection_overlay(frame, inner, app, sel, &app.theme);
     }
 
     // Calculate screen position for comment cursor if in Comment mode
@@ -2901,8 +3016,9 @@ fn is_line_highlighted(app: &App, viewport_idx: usize) -> bool {
         return true;
     }
 
-    // Visual selection or comment-mode range (preserved from visual selection)
-    let Some((range, sel_side)) = app.get_visual_selection().or(app.comment_line_range) else {
+    // Carryover from V → c: keep the comment-input box lit. The visual
+    // selection itself paints via the cell-precise overlay.
+    let Some((range, sel_side)) = app.comment_line_range else {
         return false;
     };
 
@@ -2975,15 +3091,17 @@ fn unified_line_bg_style(line: &Line, theme: &Theme) -> Option<Style> {
     Some(Style::default().bg(bg))
 }
 
-fn paint_unified_diff_row_backgrounds(
+fn paint_unified_diff_rows_with<F>(
     frame: &mut Frame,
     inner: Rect,
     visible_lines_unscrolled: &[Line],
     line_widths: &[usize],
     wrap_lines: bool,
     viewport_width: usize,
-    app: &App,
-) {
+    style_for: F,
+) where
+    F: Fn(usize, &Line) -> Option<Style>,
+{
     let mut visual_row: usize = 0;
 
     for (idx, line) in visible_lines_unscrolled.iter().enumerate() {
@@ -3002,18 +3120,11 @@ fn paint_unified_diff_row_backgrounds(
             1
         };
 
-        let row_style = if is_line_highlighted(app, idx) {
-            Some(Style::default().bg(app.theme.cursor_line_bg))
-        } else {
-            unified_line_bg_style(line, &app.theme)
-        };
-
-        if let Some(row_style) = row_style {
+        if let Some(row_style) = style_for(idx, line) {
             for _ in 0..rows_for_line {
                 if visual_row >= inner.height as usize {
                     break;
                 }
-
                 let row_rect = Rect {
                     x: inner.x,
                     y: inner.y + visual_row as u16,

@@ -3,6 +3,7 @@ use ratatui::layout::Position;
 
 use crate::app::{
     self, App, DiffSource, ExpandDirection, FileTreeItem, FocusedPanel, GapCursorHit, InputMode,
+    VisualSelection,
 };
 use crate::input::Action;
 use crate::model::ClearScope;
@@ -14,31 +15,125 @@ use crate::text_edit::{
 
 const WHEEL_LINES: usize = 3;
 
-/// Routes a crossterm mouse event. Drags are intentionally unhandled so users
-/// can hold the terminal's bypass modifier (commonly Shift or Option/Alt) to
-/// fall back to native text selection for copy.
 pub fn handle_mouse_event(app: &mut App, event: MouseEvent) {
     let pos = Position::new(event.column, event.row);
     match event.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let action = if matches!(event.kind, MouseEventKind::ScrollUp) {
+            let scroll_up = matches!(event.kind, MouseEventKind::ScrollUp);
+            let action = if scroll_up {
                 Action::MouseScrollUp(WHEEL_LINES)
             } else {
                 Action::MouseScrollDown(WHEEL_LINES)
             };
             let over_file_list = app.file_list_area.is_some_and(|r| r.contains(pos));
             let over_diff = app.diff_area.is_some_and(|r| r.contains(pos));
+            let over_commit_list = app.commit_list_inner_area.is_some_and(|r| r.contains(pos));
             match app.input_mode {
                 InputMode::Help => handle_help_action(app, action),
+                InputMode::CommitSelect | InputMode::Normal if over_commit_list => {
+                    wheel_commit_list(app, scroll_up);
+                }
                 InputMode::Normal if over_file_list => handle_file_list_action(app, action),
                 InputMode::Normal if over_diff => handle_diff_action(app, action),
+                InputMode::VisualSelect if over_diff => handle_diff_action(app, action),
                 _ => {}
             }
+            clear_visual_if_cursor_offscreen(app);
         }
-        MouseEventKind::Down(MouseButton::Left) if app.input_mode == InputMode::Normal => {
-            handle_left_click(app, pos);
+        MouseEventKind::Down(MouseButton::Left)
+            if matches!(app.input_mode, InputMode::Normal | InputMode::VisualSelect) =>
+        {
+            // Reset back to Normal so an Up without drag falls through to handle_left_click.
+            if app.input_mode == InputMode::VisualSelect {
+                app.exit_visual_mode();
+            }
+            app.mouse_drag_active = false;
+            if app.diff_inner_area.is_some_and(|r| r.contains(pos))
+                && let Some(point) = app.cell_to_sel_point(pos.x, pos.y)
+            {
+                app.visual_selection = Some(VisualSelection::collapsed(point));
+                if let Some(idx) = app.diff_annotation_at_screen_row(pos.y) {
+                    app.move_cursor_to_annotation(idx);
+                }
+            } else {
+                app.visual_selection = None;
+                handle_left_click(app, pos);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if app.input_mode == InputMode::CommitSelect => {
+            if let Some(idx) = app.commit_list_idx_at_screen_row(pos.y) {
+                app.commit_list_cursor = idx;
+                handle_commit_select_action(app, Action::ToggleCommitSelect);
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left)
+            if matches!(app.input_mode, InputMode::Normal | InputMode::VisualSelect) =>
+        {
+            let Some(sel) = app.visual_selection else {
+                return;
+            };
+            let Some(mut head) = app.cell_to_sel_point(pos.x, pos.y) else {
+                return;
+            };
+            // Pin head to the anchor's pane so cross-side drags don't escape.
+            head.side = sel.anchor.side;
+            if head == sel.head && app.mouse_drag_active {
+                return;
+            }
+            let moved = head != sel.head;
+            let promoted_now = moved && !app.mouse_drag_active;
+            app.visual_selection = Some(VisualSelection {
+                anchor: sel.anchor,
+                head,
+            });
+            if moved {
+                app.mouse_drag_active = true;
+            }
+            if promoted_now && app.input_mode == InputMode::Normal {
+                app.input_mode = InputMode::VisualSelect;
+            }
+            if app.input_mode == InputMode::VisualSelect
+                && head.annotation_idx != sel.head.annotation_idx
+            {
+                app.move_cursor_to_annotation(head.annotation_idx);
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left)
+            if matches!(app.input_mode, InputMode::Normal | InputMode::VisualSelect) =>
+        {
+            if app.visual_selection.is_none() {
+                return;
+            }
+            if !app.mouse_drag_active {
+                app.visual_selection = None;
+                if app.input_mode == InputMode::VisualSelect {
+                    app.exit_visual_mode();
+                }
+                handle_left_click(app, pos);
+            }
+            app.mouse_drag_active = false;
         }
         _ => {}
+    }
+}
+
+/// Helix-style: scrolling the cursor off-viewport drops the selection.
+pub fn clear_visual_if_cursor_offscreen(app: &mut App) {
+    if app.input_mode == InputMode::VisualSelect && !app.is_cursor_visible() {
+        app.exit_visual_mode();
+    }
+}
+
+/// Wheel scroll inside a commit list (full-screen picker or inline selector).
+/// The list is short and selection-oriented, so each tick moves the cursor
+/// rather than the viewport, matching how arrow keys behave.
+fn wheel_commit_list(app: &mut App, scroll_up: bool) {
+    for _ in 0..WHEEL_LINES {
+        if scroll_up {
+            app.commit_select_up();
+        } else {
+            app.commit_select_down();
+        }
     }
 }
 
@@ -60,11 +155,22 @@ fn handle_left_click(app: &mut App, pos: Position) {
         return;
     }
 
+    if app.has_inline_commit_selector()
+        && app.commit_list_inner_area.is_some_and(|r| r.contains(pos))
+        && let Some(idx) = app.commit_list_idx_at_screen_row(pos.y)
+    {
+        app.focused_panel = FocusedPanel::CommitSelector;
+        app.commit_list_cursor = idx;
+        handle_commit_selector_action(app, Action::SelectFile);
+        return;
+    }
+
     if app.diff_inner_area.is_some_and(|r| r.contains(pos))
         && let Some(idx) = app.diff_annotation_at_screen_row(pos.y)
     {
         app.focused_panel = FocusedPanel::Diff;
         app.move_cursor_to_annotation(idx);
+        handle_diff_action(app, Action::SelectFile);
     }
 }
 
@@ -551,36 +657,39 @@ pub fn handle_visual_action(app: &mut App, action: Action) {
     match action {
         Action::CursorDown(n) => {
             app.cursor_down(n);
-            // Check if selection crosses sides
-            if let Some((_, anchor_side)) = app.visual_anchor
-                && let Some((_, current_side)) = app.get_line_at_cursor()
-                && anchor_side != current_side
-            {
-                app.set_warning("Cannot select across old/new sides");
-            }
+            app.extend_visual_to_cursor();
         }
         Action::CursorUp(n) => {
             app.cursor_up(n);
-            // Check if selection crosses sides
-            if let Some((_, anchor_side)) = app.visual_anchor
-                && let Some((_, current_side)) = app.get_line_at_cursor()
-                && anchor_side != current_side
-            {
-                app.set_warning("Cannot select across old/new sides");
-            }
+            app.extend_visual_to_cursor();
         }
         Action::AddRangeComment => {
-            if app.get_visual_selection().is_some() {
+            if app.visual_selection_line_range().is_some() {
                 app.enter_comment_from_visual();
             } else {
-                app.set_warning("Invalid selection - cannot span old and new lines");
+                app.set_warning("Invalid selection - move cursor to a diff line");
                 app.exit_visual_mode();
             }
         }
+        Action::ExportToClipboard => {
+            match app.copy_visual_selection() {
+                Ok(0) => app.set_message("Nothing to copy"),
+                Ok(n) => app.set_message(format!("Copied {n} chars")),
+                Err(e) => app.set_warning(format!("{e}")),
+            }
+            app.exit_visual_mode();
+        }
         Action::ExitMode => app.exit_visual_mode(),
         Action::Quit => app.should_quit = true,
+        Action::ScrollViewDown(n) | Action::MouseScrollDown(n) => app.scroll_view_down(n),
+        Action::ScrollViewUp(n) | Action::MouseScrollUp(n) => app.scroll_view_up(n),
+        Action::HalfPageDown => app.scroll_down(app.diff_state.viewport_height / 2),
+        Action::HalfPageUp => app.scroll_up(app.diff_state.viewport_height / 2),
+        Action::PageDown => app.scroll_down(app.diff_state.viewport_height),
+        Action::PageUp => app.scroll_up(app.diff_state.viewport_height),
         _ => {}
     }
+    clear_visual_if_cursor_offscreen(app);
 }
 
 /// Handle actions when file list panel is focused
@@ -677,7 +786,7 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
     match action {
         Action::Quit => {
             if app.dirty && !app.quit_warned {
-                app.set_warning("Unsaved changes. Press q again to quit.");
+                app.set_sticky_warning("Unsaved changes. Press q again to quit.");
                 app.quit_warned = true;
             } else {
                 app.should_quit = true;
@@ -743,8 +852,8 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
             app.search_prev_in_diff();
         }
         Action::EnterVisualMode => {
-            if let Some((line, side)) = app.get_line_at_cursor() {
-                app.enter_visual_mode(line, side);
+            if app.get_line_at_cursor().is_some() {
+                app.enter_visual_mode_at_cursor();
             } else {
                 app.set_message("Move cursor to a diff line to start visual selection");
             }

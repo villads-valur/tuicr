@@ -533,6 +533,87 @@ impl Theme {
         }
     }
 
+    /// Ayu Mirage — the dark variant of the Ayu palette
+    /// (<https://ayutheme.com/>). Hex values are the resolved outputs
+    /// of the official `ayu-colors` palette generator, matching the
+    /// upstream `vscode-ayu` extension.
+    pub fn ayu_mirage() -> Self {
+        let bg = Color::Rgb(31, 36, 48); // #1f2430 surface.base / ui.bg
+        let bg_dark = Color::Rgb(26, 31, 41); // #1a1f29 editor.line
+        let bg_panel = Color::Rgb(40, 46, 59); // #282e3b ui.panel.bg
+        let selection = Color::Rgb(41, 48, 64); // #293040 ui.selection.active on bg
+        let fg = Color::Rgb(204, 202, 194); // #cccac2 editor.fg
+        let fg_secondary = Color::Rgb(154, 162, 175);
+        let comment = Color::Rgb(110, 124, 143); // #6e7c8f syntax.comment
+        let dim = Color::Rgb(112, 122, 140); // #707a8c ui.fg
+
+        let yellow = Color::Rgb(255, 205, 102); // #ffcd66 syntax.func
+        let orange = Color::Rgb(255, 166, 89); // #ffa659 syntax.keyword
+        let green = Color::Rgb(135, 217, 108); // #87d96c vcs.added
+        let red = Color::Rgb(242, 121, 131); // #f27983 vcs.removed
+        let cyan = Color::Rgb(92, 207, 230); // #5ccfe6 syntax.tag
+        let blue = Color::Rgb(115, 208, 255); // #73d0ff syntax.entity
+        let purple = Color::Rgb(223, 191, 255); // #dfbfff syntax.constant
+        let mint = Color::Rgb(149, 230, 203); // #95e6cb syntax.regexp
+
+        Self {
+            highlighter: OnceLock::new(),
+
+            panel_bg: bg,
+            bg_highlight: selection,
+            fg_primary: fg,
+            fg_secondary,
+            fg_dim: comment,
+
+            diff_add: green,
+            diff_add_bg: Color::Rgb(35, 53, 41),
+            diff_del: red,
+            diff_del_bg: Color::Rgb(58, 36, 41),
+            diff_context: fg,
+            diff_hunk_header: blue,
+            expanded_context_fg: dim,
+
+            syntax_add_bg: Color::Rgb(30, 47, 36),
+            syntax_del_bg: Color::Rgb(50, 30, 35),
+
+            // Closest embedded base16 dark to the Ayu Mirage feel.
+            syntect_theme: EmbeddedThemeName::Base16EightiesDark,
+
+            file_added: green,
+            file_modified: yellow,
+            file_deleted: red,
+            file_renamed: purple,
+
+            reviewed: green,
+            pending: yellow,
+
+            comment_note: blue,
+            comment_suggestion: mint,
+            comment_issue: red,
+            comment_praise: green,
+
+            border_focused: orange,
+            border_unfocused: Color::Rgb(63, 70, 84),
+            status_bar_bg: bg_dark,
+            cursor_color: orange,
+            cursor_line_bg: bg_panel,
+            branch_name: cyan,
+            help_indicator: comment,
+
+            message_info_fg: bg_dark,
+            message_info_bg: blue,
+            message_warning_fg: bg_dark,
+            message_warning_bg: yellow,
+            message_error_fg: fg,
+            message_error_bg: red,
+            update_badge_fg: bg_dark,
+            update_badge_bg: yellow,
+
+            mode_fg: bg_dark,
+            mode_bg: orange,
+        }
+    }
+
     pub fn onedark() -> Self {
         Self {
             highlighter: OnceLock::new(),
@@ -598,6 +679,200 @@ impl Theme {
             // Mode indicator colors
             mode_fg: Color::Rgb(40, 44, 52),
             mode_bg: Color::Rgb(97, 175, 239),
+        }
+    }
+
+    /// GitHub light theme (matches the github.com diff palette: Primer light tokens)
+    pub fn github_light() -> Self {
+        Self {
+            highlighter: OnceLock::new(),
+
+            panel_bg: Color::Rgb(255, 255, 255),
+            bg_highlight: Color::Rgb(221, 244, 255),
+            fg_primary: Color::Rgb(31, 35, 40),
+            fg_secondary: Color::Rgb(89, 99, 110),
+            fg_dim: Color::Rgb(110, 119, 129),
+
+            diff_add: Color::Rgb(26, 127, 55),
+            diff_add_bg: Color::Rgb(230, 255, 236),
+            diff_del: Color::Rgb(207, 34, 46),
+            diff_del_bg: Color::Rgb(255, 235, 233),
+            diff_context: Color::Rgb(31, 35, 40),
+            diff_hunk_header: Color::Rgb(9, 105, 218),
+            expanded_context_fg: Color::Rgb(110, 119, 129),
+
+            syntax_add_bg: Color::Rgb(230, 255, 236),
+            syntax_del_bg: Color::Rgb(255, 235, 233),
+
+            syntect_theme: EmbeddedThemeName::InspiredGithub,
+
+            file_added: Color::Rgb(26, 127, 55),
+            file_modified: Color::Rgb(154, 103, 0),
+            file_deleted: Color::Rgb(207, 34, 46),
+            file_renamed: Color::Rgb(130, 80, 223),
+
+            reviewed: Color::Rgb(26, 127, 55),
+            pending: Color::Rgb(154, 103, 0),
+
+            comment_note: Color::Rgb(9, 105, 218),
+            comment_suggestion: Color::Rgb(20, 130, 130),
+            comment_issue: Color::Rgb(207, 34, 46),
+            comment_praise: Color::Rgb(26, 127, 55),
+
+            border_focused: Color::Rgb(9, 105, 218),
+            border_unfocused: Color::Rgb(208, 215, 222),
+            status_bar_bg: Color::Rgb(246, 248, 250),
+            cursor_color: Color::Rgb(154, 103, 0),
+            cursor_line_bg: Color::Rgb(221, 244, 255),
+            branch_name: Color::Rgb(9, 105, 218),
+            help_indicator: Color::Rgb(110, 119, 129),
+
+            message_info_fg: Color::White,
+            message_info_bg: Color::Rgb(9, 105, 218),
+            message_warning_fg: Color::White,
+            message_warning_bg: Color::Rgb(154, 103, 0),
+            message_error_fg: Color::White,
+            message_error_bg: Color::Rgb(207, 34, 46),
+            update_badge_fg: Color::White,
+            update_badge_bg: Color::Rgb(154, 103, 0),
+
+            mode_fg: Color::White,
+            mode_bg: Color::Rgb(9, 105, 218),
+        }
+    }
+
+    /// GitHub dark theme (matches the github.com dark mode diff palette: Primer dark tokens)
+    pub fn github_dark() -> Self {
+        Self {
+            highlighter: OnceLock::new(),
+
+            panel_bg: Color::Rgb(13, 17, 23),
+            bg_highlight: Color::Rgb(33, 38, 45),
+            fg_primary: Color::Rgb(230, 237, 243),
+            fg_secondary: Color::Rgb(201, 209, 217),
+            fg_dim: Color::Rgb(139, 148, 158),
+
+            diff_add: Color::Rgb(63, 185, 80),
+            diff_add_bg: Color::Rgb(16, 35, 28),
+            diff_del: Color::Rgb(248, 81, 73),
+            diff_del_bg: Color::Rgb(48, 27, 31),
+            diff_context: Color::Rgb(230, 237, 243),
+            diff_hunk_header: Color::Rgb(88, 166, 255),
+            expanded_context_fg: Color::Rgb(139, 148, 158),
+
+            syntax_add_bg: Color::Rgb(16, 35, 28),
+            syntax_del_bg: Color::Rgb(48, 27, 31),
+
+            syntect_theme: EmbeddedThemeName::OneHalfDark,
+
+            file_added: Color::Rgb(63, 185, 80),
+            file_modified: Color::Rgb(210, 153, 34),
+            file_deleted: Color::Rgb(248, 81, 73),
+            file_renamed: Color::Rgb(163, 113, 247),
+
+            reviewed: Color::Rgb(63, 185, 80),
+            pending: Color::Rgb(210, 153, 34),
+
+            comment_note: Color::Rgb(88, 166, 255),
+            comment_suggestion: Color::Rgb(86, 212, 221),
+            comment_issue: Color::Rgb(248, 81, 73),
+            comment_praise: Color::Rgb(63, 185, 80),
+
+            border_focused: Color::Rgb(88, 166, 255),
+            border_unfocused: Color::Rgb(48, 54, 61),
+            status_bar_bg: Color::Rgb(22, 27, 34),
+            cursor_color: Color::Rgb(210, 153, 34),
+            cursor_line_bg: Color::Rgb(22, 27, 34),
+            branch_name: Color::Rgb(88, 166, 255),
+            help_indicator: Color::Rgb(139, 148, 158),
+
+            message_info_fg: Color::Rgb(13, 17, 23),
+            message_info_bg: Color::Rgb(88, 166, 255),
+            message_warning_fg: Color::Rgb(13, 17, 23),
+            message_warning_bg: Color::Rgb(210, 153, 34),
+            message_error_fg: Color::White,
+            message_error_bg: Color::Rgb(248, 81, 73),
+            update_badge_fg: Color::Rgb(13, 17, 23),
+            update_badge_bg: Color::Rgb(210, 153, 34),
+
+            mode_fg: Color::White,
+            mode_bg: Color::Rgb(88, 166, 255),
+        }
+    }
+
+    /// Tokyo Night Storm (folke/tokyonight.nvim "storm" variant)
+    pub fn tokyo_night_storm() -> Self {
+        let bg = Color::Rgb(36, 40, 59); // #24283b
+        let bg_dark = Color::Rgb(31, 35, 53); // #1f2335
+        let bg_highlight = Color::Rgb(41, 46, 66); // #292e42
+        let terminal_black = Color::Rgb(65, 72, 104); // #414868
+        let fg = Color::Rgb(192, 202, 245); // #c0caf5
+        let fg_dark = Color::Rgb(169, 177, 214); // #a9b1d6
+        let dark3 = Color::Rgb(84, 92, 126); // #545c7e
+        let comment = Color::Rgb(86, 95, 137); // #565f89
+        let blue = Color::Rgb(122, 162, 247); // #7aa2f7
+        let cyan = Color::Rgb(125, 207, 255); // #7dcfff
+        let magenta = Color::Rgb(187, 154, 247); // #bb9af7
+        let orange = Color::Rgb(255, 158, 100); // #ff9e64
+        let yellow = Color::Rgb(224, 175, 104); // #e0af68
+        let green = Color::Rgb(158, 206, 106); // #9ece6a
+        let red = Color::Rgb(247, 118, 142); // #f7768e
+
+        Self {
+            highlighter: OnceLock::new(),
+
+            panel_bg: bg,
+            bg_highlight,
+            fg_primary: fg,
+            fg_secondary: fg_dark,
+            fg_dim: dark3,
+
+            diff_add: green,
+            diff_add_bg: Color::Rgb(32, 48, 59), // #20303b
+            diff_del: red,
+            diff_del_bg: Color::Rgb(55, 34, 44), // #37222c
+            diff_context: fg_dark,
+            diff_hunk_header: blue,
+            expanded_context_fg: dark3,
+
+            syntax_add_bg: Color::Rgb(28, 42, 52),
+            syntax_del_bg: Color::Rgb(47, 30, 38),
+
+            // Closest embedded base16 dark with the muted blue/purple feel
+            syntect_theme: EmbeddedThemeName::Base16EightiesDark,
+
+            file_added: green,
+            file_modified: yellow,
+            file_deleted: red,
+            file_renamed: magenta,
+
+            reviewed: green,
+            pending: yellow,
+
+            comment_note: blue,
+            comment_suggestion: cyan,
+            comment_issue: red,
+            comment_praise: green,
+
+            border_focused: blue,
+            border_unfocused: terminal_black,
+            status_bar_bg: bg_dark,
+            cursor_color: orange,
+            cursor_line_bg: bg_highlight,
+            branch_name: cyan,
+            help_indicator: comment,
+
+            message_info_fg: bg_dark,
+            message_info_bg: blue,
+            message_warning_fg: bg_dark,
+            message_warning_bg: yellow,
+            message_error_fg: fg,
+            message_error_bg: red,
+            update_badge_fg: bg_dark,
+            update_badge_bg: yellow,
+
+            mode_fg: bg_dark,
+            mode_bg: blue,
         }
     }
 
@@ -1035,7 +1310,10 @@ pub enum ThemeArg {
     Dark,
     Light,
     AyuLight,
+    AyuMirage,
     Onedark,
+    GithubLight,
+    GithubDark,
     CatppuccinLatte,
     CatppuccinFrappe,
     CatppuccinMacchiato,
@@ -1048,13 +1326,17 @@ pub enum ThemeArg {
     NordLightHighContrast,
     SolarizedLight,
     SolarizedDark,
+    TokyoNightStorm,
 }
 
-const THEME_CHOICES: [(&str, ThemeArg); 16] = [
+const THEME_CHOICES: [(&str, ThemeArg); 20] = [
     ("dark", ThemeArg::Dark),
     ("light", ThemeArg::Light),
     ("ayu-light", ThemeArg::AyuLight),
+    ("ayu-mirage", ThemeArg::AyuMirage),
     ("onedark", ThemeArg::Onedark),
+    ("github-light", ThemeArg::GithubLight),
+    ("github-dark", ThemeArg::GithubDark),
     ("catppuccin-latte", ThemeArg::CatppuccinLatte),
     ("catppuccin-frappe", ThemeArg::CatppuccinFrappe),
     ("catppuccin-macchiato", ThemeArg::CatppuccinMacchiato),
@@ -1067,6 +1349,7 @@ const THEME_CHOICES: [(&str, ThemeArg); 16] = [
     ("nord-light-high-contrast", ThemeArg::NordLightHighContrast),
     ("solarized-light", ThemeArg::SolarizedLight),
     ("solarized-dark", ThemeArg::SolarizedDark),
+    ("tokyo-night-storm", ThemeArg::TokyoNightStorm),
 ];
 
 /// CLI arguments parsed from command line
@@ -1161,7 +1444,10 @@ pub fn resolve_theme(arg: ThemeArg) -> Theme {
         ThemeArg::Dark => Theme::dark(),
         ThemeArg::Light => Theme::light(),
         ThemeArg::AyuLight => Theme::ayu_light(),
+        ThemeArg::AyuMirage => Theme::ayu_mirage(),
         ThemeArg::Onedark => Theme::onedark(),
+        ThemeArg::GithubLight => Theme::github_light(),
+        ThemeArg::GithubDark => Theme::github_dark(),
         ThemeArg::CatppuccinLatte => Theme::catppuccin_latte(),
         ThemeArg::CatppuccinFrappe => Theme::catppuccin_frappe(),
         ThemeArg::CatppuccinMacchiato => Theme::catppuccin_macchiato(),
@@ -1174,6 +1460,7 @@ pub fn resolve_theme(arg: ThemeArg) -> Theme {
         ThemeArg::NordLightHighContrast => Theme::nord_light_high_contrast(),
         ThemeArg::SolarizedLight => Theme::solarized_light(),
         ThemeArg::SolarizedDark => Theme::solarized_dark(),
+        ThemeArg::TokyoNightStorm => Theme::tokyo_night_storm(),
     }
 }
 

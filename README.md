@@ -117,7 +117,7 @@ Detection order: Jujutsu → Git → Mercurial. Jujutsu is tried first because j
 | `-r` / `--revisions <REVSET>` | Commit range/Revision set to review. Exact syntax depends on VCS backend (Git, JJ, Hg) |
 | `--pr` | Review branch changes as a PR diff (`merge-base(base, HEAD)..HEAD`) |
 | `--base <REF>` | Base ref for PR mode (implies `--pr`), for example `origin/main` |
-| `--theme <THEME>` | Color theme override (`dark`, `light`, `ayu-light`, `onedark`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `gruvbox-dark`, `gruvbox-light`) |
+| `--theme <THEME>` | Color theme override (`dark`, `light`, `ayu-light`, `ayu-mirage`, `onedark`, `github-light`, `github-dark`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `gruvbox-dark`, `gruvbox-light`, `nord-dark`, `nord-light`, `nord-dark-high-contrast`, `nord-light-high-contrast`, `solarized-light`, `solarized-dark`, `tokyo-night-storm`) |
 | `--appearance <MODE>` | Appearance mode for default theme (`dark`, `light`, `system`) |
 | `--stdout` | Output to stdout instead of clipboard when exporting |
 | `--no-update-check` | Skip checking for updates on startup |
@@ -146,8 +146,11 @@ theme_light = "gruvbox-light"
 
 show_file_list = false
 diff_view = "side-by-side"
+backend = "libgit2"
 wrap = true
 cursor_line = false
+transparent_background = false
+scroll_offset = 5
 
 comment_types = [
   { id = "note", label = "question", definition = "ask for clarification", color = "yellow" },
@@ -162,9 +165,15 @@ comment_types = [
 
 `diff_view` sets the default diff layout: `"unified"` (default) or `"side-by-side"`. Toggle at runtime with `:diff`.
 
+`backend` selects the Git implementation: `"libgit2"` (default for normal Git repos) or `"cli"`. Sparse checkout repositories are automatically routed to the Git CLI backend because libgit2 does not support sparse-index checkouts reliably.
+
 `wrap` enables line wrapping in the diff view (default: `false`). Toggle at runtime with `:set wrap!`.
 
 `cursor_line` highlights the current cursor line and visual selection in the diff view (default: `true`). Set to `false` to disable.
+
+`transparent_background` lets the terminal background show through panels (default: `true`). Set to `false` to paint the theme's `panel_bg` color instead.
+
+`scroll_offset` keeps a minimum number of lines visible above and below the cursor when scrolling (similar to Vim's `scrolloff`). Default: `0` (no margin).
 
 `comment_types` replaces the default list and defines Tab cycle order.
 Each entry requires `id` and can optionally set `label`, `definition`, and `color`.
@@ -219,7 +228,7 @@ dist/
 
 ### Mouse
 
-Mouse support is **opt-in**. Enable it in your config:
+Mouse support is **off by default in this fork** (upstream defaults to on as of v0.12.0). To enable, set in your config:
 
 ```toml
 mouse = true
@@ -227,12 +236,14 @@ mouse = true
 
 | Action | Effect |
 |--------|--------|
-| Wheel up/down | Scroll the panel under the cursor (file list, diff, or help popup) without moving the cursor line |
+| Wheel up/down | Scroll the panel under the cursor (file list, diff, commit list, or help popup) without moving the cursor line |
 | Click on a file | Jump to that file (lazygit-style) |
 | Click on a directory | Expand or collapse it |
 | Click on a diff line | Position the cursor on that line |
+| Click on a commit | Toggle selection (or expand the row to load more) |
+| Drag in diff | Highlight a range; press `y` to copy the selected source lines |
 
-When mouse capture is on, the terminal stops handling drag-to-select natively. To copy text, hold your terminal's bypass modifier while dragging (commonly **Shift** or **Option/Alt**, depending on the terminal). Check your terminal's docs if neither works.
+For full native terminal selection across the whole UI, hold your terminal's bypass modifier while dragging (commonly **Shift** or **Option/Alt**, depending on the terminal). Check your terminal's docs if neither works.
 
 ### Keybindings
 

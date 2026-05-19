@@ -7,6 +7,7 @@ mod input;
 mod model;
 mod output;
 mod persistence;
+mod profile;
 mod syntax;
 mod text_edit;
 mod theme;
@@ -33,7 +34,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use app::{App, FocusedPanel, InputMode};
+use app::{App, AppStartupOptions, FocusedPanel, InputMode};
 use handler::{
     handle_command_action, handle_comment_action, handle_commit_select_action,
     handle_commit_selector_action, handle_confirm_action, handle_diff_action,
@@ -42,6 +43,7 @@ use handler::{
 };
 use input::{Action, map_key_to_action};
 use theme::{parse_cli_args, resolve_theme_with_config};
+use vcs::GitBackendPreference;
 
 /// Timeout for the "press Ctrl+C again to exit" feature
 const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -49,6 +51,8 @@ const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_WIDTH_FOR_FILE_LIST: u16 = 100;
 
 fn main() -> anyhow::Result<()> {
+    profile::init_from_env();
+
     // Setup panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -61,7 +65,7 @@ fn main() -> anyhow::Result<()> {
 
     // Parse CLI arguments and resolve theme
     // This also configures syntax highlighting colors before diff parsing
-    let mut cli_args = parse_cli_args();
+    let mut cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
 
     // Check keyboard enhancement support before enabling raw mode.
     // Skip when --stdout is used because the probe writes escape sequences to stdout,
@@ -93,35 +97,46 @@ fn main() -> anyhow::Result<()> {
         cli_args.working_tree = true;
     }
     let mut startup_warnings = Vec::new();
-    let config_outcome = match config::load_config() {
+    let config_outcome = profile::time("startup.load_config", || match config::load_config() {
         Ok(outcome) => outcome,
         Err(e) => {
             startup_warnings.push(format!("Failed to load config: {e}"));
             config::ConfigLoadOutcome::default()
         }
-    };
+    });
     startup_warnings.extend(config_outcome.warnings);
-    let (theme, theme_warnings) = resolve_theme_with_config(
-        cli_args.theme,
-        cli_args.appearance,
-        config_outcome
-            .config
-            .as_ref()
-            .and_then(|cfg| cfg.theme.as_deref()),
-        config_outcome
-            .config
-            .as_ref()
-            .and_then(|cfg| cfg.theme_dark.as_deref()),
-        config_outcome
-            .config
-            .as_ref()
-            .and_then(|cfg| cfg.theme_light.as_deref()),
-        config_outcome
-            .config
-            .as_ref()
-            .and_then(|cfg| cfg.appearance.as_deref()),
-    );
+    let (mut theme, theme_warnings) = profile::time("startup.resolve_theme", || {
+        resolve_theme_with_config(
+            cli_args.theme,
+            cli_args.appearance,
+            config_outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.theme.as_deref()),
+            config_outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.theme_dark.as_deref()),
+            config_outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.theme_light.as_deref()),
+            config_outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.appearance.as_deref()),
+        )
+    });
     startup_warnings.extend(theme_warnings);
+
+    let transparent = config_outcome
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.transparent_background)
+        .unwrap_or(true);
+    if transparent {
+        theme.panel_bg = ratatui::style::Color::Reset;
+    }
 
     // Start update check in background (non-blocking)
     let update_rx = if !cli_args.no_update_check {
@@ -136,25 +151,35 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Initialize app
-    let mut app = match App::new(
-        theme,
+    let git_backend_preference = GitBackendPreference::from_config(
         config_outcome
             .config
             .as_ref()
-            .and_then(|cfg| cfg.comment_types.clone()),
-        cli_args.output_to_stdout,
-        cli_args.revisions.as_deref(),
-        cli_args.pr_mode,
-        cli_args.pr_base_ref.as_deref(),
-        cli_args.working_tree,
-        cli_args.path_filter.as_deref(),
-        cli_args.file_path.as_deref(),
-    ) {
+            .and_then(|cfg| cfg.backend.as_deref()),
+    );
+
+    let mut app = match profile::time("startup.app_init", || {
+        App::new(
+            theme,
+            config_outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.comment_types.clone()),
+            cli_args.output_to_stdout,
+            AppStartupOptions {
+                revisions: cli_args.revisions.as_deref(),
+                pr_mode: cli_args.pr_mode,
+                pr_base_ref: cli_args.pr_base_ref.as_deref(),
+                working_tree: cli_args.working_tree,
+                path_filter: cli_args.path_filter.as_deref(),
+                file_path: cli_args.file_path.as_deref(),
+                git_backend_preference,
+            },
+        )
+    }) {
         Ok(mut app) => {
             app.supports_keyboard_enhancement = keyboard_enhancement_supported;
-            if let Some(message) = startup_warnings.first() {
-                app.set_warning(message.clone());
-            }
+            startup_warnings.extend(app.vcs.startup_warnings());
             app
         }
         Err(e) => {
@@ -182,11 +207,7 @@ fn main() -> anyhow::Result<()> {
         Box::new(io::stdout())
     };
     execute!(tty_output, EnterAlternateScreen)?;
-    let mouse_enabled = config_outcome
-        .config
-        .as_ref()
-        .and_then(|cfg| cfg.mouse)
-        .unwrap_or(false);
+    let mouse_enabled = config::resolve_mouse_enabled(config_outcome.config.as_ref());
     if mouse_enabled {
         execute!(tty_output, EnableMouseCapture)?;
     }
@@ -220,6 +241,9 @@ fn main() -> anyhow::Result<()> {
         if cfg.cursor_line == Some(false) {
             app.cursor_line_highlight = false;
         }
+        if let Some(scroll_offset) = cfg.scroll_offset {
+            app.scroll_offset = scroll_offset;
+        }
     }
 
     // On narrow terminals, start with only the diff panel visible.
@@ -228,6 +252,10 @@ fn main() -> anyhow::Result<()> {
     {
         app.show_file_list = false;
         app.focused_panel = FocusedPanel::Diff;
+    }
+
+    if let Some(message) = startup_warnings.first() {
+        app.set_warning(message.clone());
     }
 
     // Track pending z command for zz centering
@@ -243,11 +271,6 @@ fn main() -> anyhow::Result<()> {
 
     // Main loop
     loop {
-        // Render
-        terminal.draw(|frame| {
-            ui::render(frame, &mut app);
-        })?;
-
         // Check for update result (non-blocking)
         if let Some(ref rx) = update_rx
             && let Ok(
@@ -265,6 +288,13 @@ fn main() -> anyhow::Result<()> {
             pending_ctrl_c = None;
             app.message = None;
         }
+
+        app.clear_expired_message();
+
+        // Render
+        terminal.draw(|frame| {
+            ui::render(frame, &mut app);
+        })?;
 
         // Handle events
         if event::poll(Duration::from_millis(100))? {
