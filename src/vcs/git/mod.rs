@@ -357,6 +357,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cli_backend_returns_unsupported_for_pull_request_diff() {
+        use crate::syntax::SyntaxHighlighter;
+
+        let temp_dir = tempdir().expect("failed to create temp dir");
+        let root = temp_dir.path();
+        setup_standard_repo(root);
+
+        let backend = GitBackend::discover_from(root, GitBackendPreference::Cli)
+            .expect("failed to discover CLI backend");
+
+        let result = backend.get_pull_request_diff(Some("HEAD"), &SyntaxHighlighter::default());
+
+        match result {
+            Err(TuicrError::UnsupportedOperation(_)) => {}
+            other => panic!("expected UnsupportedOperation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn libgit2_backend_dispatches_pull_request_diff_through_enum() {
+        use crate::syntax::SyntaxHighlighter;
+
+        let temp_dir = tempdir().expect("failed to create temp dir");
+        let root = temp_dir.path();
+        setup_standard_repo(root);
+        let base_oid = run_git_command(root, &["rev-parse", "HEAD"])
+            .expect("failed to read HEAD")
+            .trim()
+            .to_string();
+
+        // add a feature commit
+        fs::write(root.join("src/file.txt"), "one\ntwo\n").expect("failed to write");
+        run_git_command(root, &["add", "src/file.txt"]).expect("failed to stage");
+        run_git_command(root, &["commit", "-m", "feat"]).expect("failed to commit");
+
+        let backend = GitBackend::discover_from(root, GitBackendPreference::Libgit2)
+            .expect("failed to discover libgit2 backend");
+        assert!(matches!(backend, GitBackend::Libgit2(_)));
+
+        let pr_diff = backend
+            .get_pull_request_diff(Some(&base_oid), &SyntaxHighlighter::default())
+            .expect("PR diff should succeed");
+
+        assert_eq!(pr_diff.info.base_ref, base_oid);
+        assert_eq!(pr_diff.info.commit_count, 1);
+        assert_eq!(pr_diff.files.len(), 1);
+    }
+
     fn setup_standard_repo(root: &Path) {
         fs::create_dir(root.join("src")).expect("failed to create src dir");
         fs::write(root.join("src/file.txt"), "one\n").expect("failed to write file");

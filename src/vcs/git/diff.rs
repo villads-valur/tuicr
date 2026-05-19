@@ -420,6 +420,29 @@ mod tests {
             .expect("failed to create commit");
     }
 
+    fn commit_file(repo: &Repository, file_name: &str, content: &str, message: &str) {
+        fs::write(repo.workdir().unwrap().join(file_name), content).expect("failed to write file");
+
+        let mut index = repo.index().expect("failed to open index");
+        index
+            .add_path(Path::new(file_name))
+            .expect("failed to add path");
+        index.write().expect("failed to write index");
+
+        let tree_id = index.write_tree().expect("failed to write tree");
+        let tree = repo.find_tree(tree_id).expect("failed to find tree");
+        let sig = git2::Signature::now("Test User", "test@example.com")
+            .expect("failed to create signature");
+        let parent = repo
+            .head()
+            .expect("HEAD missing")
+            .peel_to_commit()
+            .expect("HEAD not a commit");
+
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .expect("failed to create commit");
+    }
+
     #[test]
     fn should_return_no_changes_for_clean_repo() {
         let repo = Repository::discover(".").unwrap();
@@ -530,5 +553,112 @@ mod tests {
             get_unstaged_diff(&repo, &highlighter),
             Err(TuicrError::NoChanges)
         ));
+    }
+
+    #[test]
+    fn should_diff_branch_against_base_for_pull_request() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let repo = Repository::init(temp_dir.path()).expect("failed to init repo");
+
+        // base commit on HEAD
+        create_initial_commit(&repo, "file.txt", "base\n");
+        let base_oid = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
+
+        // two feature commits on top
+        commit_file(&repo, "file.txt", "base\nfeat-one\n", "feat one");
+        commit_file(&repo, "file.txt", "base\nfeat-one\nfeat-two\n", "feat two");
+        let head_oid = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
+
+        let pr_diff = get_pull_request_diff(&repo, Some(&base_oid), &SyntaxHighlighter::default())
+            .expect("PR diff failed");
+
+        assert_eq!(pr_diff.info.base_ref, base_oid);
+        assert_eq!(pr_diff.info.merge_base_commit, base_oid);
+        assert_eq!(pr_diff.info.head_commit, head_oid);
+        assert_eq!(pr_diff.info.commit_count, 2);
+        assert_eq!(pr_diff.files.len(), 1);
+        assert_eq!(pr_diff.files[0].status, FileStatus::Modified);
+    }
+
+    #[test]
+    fn should_return_no_changes_for_pull_request_at_head() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let repo = Repository::init(temp_dir.path()).expect("failed to init repo");
+
+        create_initial_commit(&repo, "file.txt", "base\n");
+        let head_oid = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
+
+        let result = get_pull_request_diff(&repo, Some(&head_oid), &SyntaxHighlighter::default());
+
+        assert!(matches!(result, Err(TuicrError::NoChanges)));
+    }
+
+    #[test]
+    fn should_error_for_unresolvable_pull_request_base() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let repo = Repository::init(temp_dir.path()).expect("failed to init repo");
+
+        create_initial_commit(&repo, "file.txt", "base\n");
+
+        let result =
+            get_pull_request_diff(&repo, Some("does-not-exist"), &SyntaxHighlighter::default());
+
+        match result {
+            Err(TuicrError::VcsCommand(msg)) => {
+                assert!(msg.contains("does-not-exist"), "got: {msg}");
+            }
+            other => panic!("expected VcsCommand error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_error_when_no_pull_request_base_can_be_inferred() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let repo = Repository::init(temp_dir.path()).expect("failed to init repo");
+
+        create_initial_commit(&repo, "file.txt", "base\n");
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+
+        // Move HEAD onto a branch outside resolve_base_reference's candidate list,
+        // then delete any local main/master branches so all four fallbacks fail.
+        repo.branch("feature-only", &head_commit, true)
+            .expect("failed to create feature branch");
+        repo.set_head("refs/heads/feature-only")
+            .expect("failed to set HEAD");
+        for name in ["main", "master"] {
+            if let Ok(mut branch) = repo.find_branch(name, git2::BranchType::Local) {
+                branch.delete().expect("failed to delete fallback branch");
+            }
+        }
+
+        let result = get_pull_request_diff(&repo, None, &SyntaxHighlighter::default());
+
+        match result {
+            Err(TuicrError::VcsCommand(msg)) => {
+                assert!(
+                    msg.contains("Could not determine PR base reference"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected VcsCommand error, got {other:?}"),
+        }
     }
 }

@@ -34,6 +34,14 @@ pub struct AppConfig {
     pub scroll_offset: Option<usize>,
 }
 
+/// Resolve the mouse-enabled policy from an optional config.
+///
+/// Fork override: default is OFF when unset (upstream flipped to on-by-default
+/// in v0.12.0 #270). Users opt in via `mouse = true`.
+pub fn resolve_mouse_enabled(config: Option<&AppConfig>) -> bool {
+    config.and_then(|cfg| cfg.mouse).unwrap_or(false)
+}
+
 /// Known top-level config keys. Used to warn about typos.
 const KNOWN_KEYS: &[&str] = &[
     "theme",
@@ -690,6 +698,29 @@ mod tests {
             outcome.warnings[0],
             "Warning: Config key 'mouse' must be a boolean; ignoring value"
         );
+    }
+
+    #[test]
+    fn resolve_mouse_enabled_defaults_to_off_when_no_config() {
+        assert!(!resolve_mouse_enabled(None));
+    }
+
+    #[test]
+    fn resolve_mouse_enabled_defaults_to_off_when_unset() {
+        let outcome = parse_config("\n");
+        assert!(!resolve_mouse_enabled(outcome.config.as_ref()));
+    }
+
+    #[test]
+    fn resolve_mouse_enabled_honors_explicit_true() {
+        let outcome = parse_config("mouse = true\n");
+        assert!(resolve_mouse_enabled(outcome.config.as_ref()));
+    }
+
+    #[test]
+    fn resolve_mouse_enabled_honors_explicit_false() {
+        let outcome = parse_config("mouse = false\n");
+        assert!(!resolve_mouse_enabled(outcome.config.as_ref()));
     }
 
     // export_legend

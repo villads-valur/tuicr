@@ -207,12 +207,7 @@ fn main() -> anyhow::Result<()> {
         Box::new(io::stdout())
     };
     execute!(tty_output, EnterAlternateScreen)?;
-    // Fork override: keep mouse default OFF (upstream flipped to true in v0.12.0 #270).
-    let mouse_enabled = config_outcome
-        .config
-        .as_ref()
-        .and_then(|cfg| cfg.mouse)
-        .unwrap_or(false);
+    let mouse_enabled = config::resolve_mouse_enabled(config_outcome.config.as_ref());
     if mouse_enabled {
         execute!(tty_output, EnableMouseCapture)?;
     }
